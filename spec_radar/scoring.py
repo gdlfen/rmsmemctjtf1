@@ -75,6 +75,15 @@ def _finite(value: Any, default: float = np.nan) -> float:
         return default
 
 
+def _size_sweet(cap: pd.Series, low: float, high: float) -> pd.Series:
+    """流通市值甜点区：太小吃流动性/控盘风险，太大拉不动。"""
+    x = pd.to_numeric(cap, errors="coerce").clip(lower=1)
+    center = float(np.sqrt(low * high))
+    half_width = max(0.15, float(np.log(high / low)) / 2.0)
+    score = (1.0 - (np.log(x / center).abs() / half_width)).clip(0, 1) * 100.0
+    return score.fillna(30.0)
+
+
 def _pe_score(pe: Any) -> float:
     v = _finite(pe)
     if not np.isfinite(v):
@@ -309,9 +318,10 @@ def _components_potential(df: pd.DataFrame, macro: Dict[str, Any]) -> pd.DataFra
     c["neglect"] = _clip(neglect)
 
     elasticity = (
-        0.55 * _rank(df["float_mcap_yi"], False)
-        + 0.25 * _rank(df["beta60"].abs(), True)
-        + 0.20 * np.where(df["limit_pct"] >= 0.195, 95.0, 65.0)
+        0.40 * _size_sweet(df["float_mcap_yi"], 50.0, 120.0)
+        + 0.20 * _rank(df["float_mcap_yi"], False)
+        + 0.22 * _rank(df["beta60"].abs(), True)
+        + 0.18 * np.where(df["limit_pct"] >= 0.195, 95.0, 65.0)
     )
     c["elasticity"] = _clip(elasticity)
 
@@ -362,14 +372,32 @@ def _components_active(df: pd.DataFrame, macro: Dict[str, Any]) -> pd.DataFrame:
         + 0.30 * _rank(df["rs60"], True)
         + 0.20 * _rank(df["limit_up20"], True)
     )
-    c["theme"] = _clip(0.35 * theme_exposure + 0.25 * concept_heat + 0.20 * industry_heat + 0.20 * leadership)
-
-    volume = (
-        0.30 * _rank(np.log1p(df["amount_mean5"].clip(lower=0)), True)
-        + 0.25 * _rank(df["turnover_mean5"], True)
-        + 0.25 * _rank(df["volume_expansion"], True)
-        + 0.20 * _rank(df["up_down_vol_ratio"], True)
+    sector_limitup = df.get("sector_limitup_count", pd.Series(np.nan, index=df.index))
+    sector_heat = _rank(sector_limitup, True)
+    board_count = df.get("consecutive_limit_up", pd.Series(0.0, index=df.index)).fillna(0)
+    board_score = pd.Series(50.0, index=df.index)
+    board_score.loc[board_count <= 0] = 35.0
+    board_score.loc[(board_count >= 1) & (board_count <= 3)] = 90.0
+    board_score.loc[(board_count >= 4) & (board_count <= 5)] = 65.0
+    board_score.loc[board_count >= 6] = 30.0
+    first_board = df.get("first_board", pd.Series(0.0, index=df.index)).fillna(0)
+    recognition = 0.55 * board_score + 0.25 * _rank(df["limit_up20"], True) + 0.20 * (first_board * 100.0)
+    c["theme"] = _clip(
+        0.26 * theme_exposure + 0.19 * concept_heat + 0.14 * industry_heat
+        + 0.13 * leadership + 0.18 * recognition + 0.10 * sector_heat
     )
+
+    seal_ratio = df.get("seal_ratio", pd.Series(np.nan, index=df.index))
+    seal_quality = (seal_ratio.fillna(0) / 0.03).clip(0, 1) * 100
+    open_count = df.get("open_count", pd.Series(np.nan, index=df.index))
+    volume = (
+        0.28 * _rank(np.log1p(df["amount_mean5"].clip(lower=0)), True)
+        + 0.22 * _rank(df["turnover_mean5"], True)
+        + 0.22 * _rank(df["volume_expansion"], True)
+        + 0.18 * _rank(df["up_down_vol_ratio"], True)
+        + 0.10 * seal_quality
+    )
+    volume = volume - 8.0 * (open_count.fillna(0) >= 3).astype(float)
     c["volume"] = _clip(volume)
 
     near60 = np.clip((1.0 + df["dist_high60"].fillna(-0.25) - 0.75) / 0.25, 0, 1) * 100
@@ -383,18 +411,23 @@ def _components_active(df: pd.DataFrame, macro: Dict[str, Any]) -> pd.DataFrame:
         + 0.20 * breakout + 0.15 * _rank(df["rs20"], True)
     )
 
+    lhb_net = df.get("lhb_net_yi", pd.Series(np.nan, index=df.index))
+    lhb_hot = df.get("lhb_hot_seat_count", pd.Series(np.nan, index=df.index))
+    lhb_score = 50.0 + 25.0 * np.tanh(lhb_net.fillna(0) / 0.8) + 10.0 * np.clip(lhb_hot.fillna(0), 0, 3)
     flow = (
-        0.35 * _rank(df["obv_slope20"], True)
-        + 0.30 * _rank(df["cmf20"], True)
-        + 0.20 * _rank(df["up_down_vol_ratio"], True)
-        + 0.15 * _rank(df["obv_divergence"], True)
+        0.32 * _rank(df["obv_slope20"], True)
+        + 0.27 * _rank(df["cmf20"], True)
+        + 0.18 * _rank(df["up_down_vol_ratio"], True)
+        + 0.13 * _rank(df["obv_divergence"], True)
+        + 0.10 * pd.Series(lhb_score, index=df.index).clip(0, 100)
     )
     c["flow"] = _clip(flow)
 
     elasticity = (
-        0.50 * _rank(df["float_mcap_yi"], False)
-        + 0.30 * _rank(df["beta60"].abs(), True)
-        + 0.20 * np.where(df["limit_pct"] >= 0.195, 95.0, 65.0)
+        0.45 * _size_sweet(df["float_mcap_yi"], 30.0, 150.0)
+        + 0.18 * _rank(df["float_mcap_yi"], False)
+        + 0.22 * _rank(df["beta60"].abs(), True)
+        + 0.15 * np.where(df["limit_pct"] >= 0.195, 95.0, 65.0)
     )
     c["elasticity"] = _clip(elasticity)
 
@@ -442,6 +475,8 @@ def _risk_penalty(df: pd.DataFrame, model_key: str) -> Tuple[pd.Series, List[Lis
                 add("换手偏热，潜伏性价比下降", 4)
             if val("limit_up20") >= 2:
                 add("近期涨停偏多", 4)
+            if val("consecutive_limit_up", 0) >= 2:
+                add("已进入连板加速，不属于潜伏", 6)
             if val("maxdd60") < -0.30:
                 add("60日回撤较深", 6)
             if val("ret250") < -0.35:
@@ -478,6 +513,19 @@ def _risk_penalty(df: pd.DataFrame, model_key: str) -> Tuple[pd.Series, List[Lis
                 add("20日涨幅极端", 5)
             if val("ret60") > 1.0:
                 add("60日翻倍，兑现压力大", 5)
+            board_n = val("consecutive_limit_up", 0)
+            if board_n >= 7:
+                add(f"{int(board_n)}连板，末端接力风险", 8)
+            elif board_n >= 4:
+                add(f"{int(board_n)}连板，只适合观察/轻仓", 3)
+            if val("open_count", 0) >= 3:
+                add("涨停反复开板，封板质量差", 5)
+            if board_n >= 1 and 0 <= val("seal_ratio", 1) < 0.01:
+                add("封单/流通市值偏低", 3)
+            if val("lhb_net_yi", 0) < -0.2:
+                add("龙虎榜净卖出", 3)
+            if val("lhb_top_buy_ratio", 0) > 0.5:
+                add("龙虎榜买一集中度过高", 2)
             if val("turnover_mean20") > 0.20:
                 add("换手过热", 4)
             if val("maxdd60") < -0.35:

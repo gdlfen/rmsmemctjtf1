@@ -52,6 +52,14 @@ app.py
 7. 不需要 Secrets、不需要数据库、不需要额外 packages.txt；
 8. 点击 **Deploy**，等待安装依赖并启动。
 
+部署前可选（建议先本地运行一次，把最新灾备包/预测参数提交）：
+
+```bash
+python scripts/build_bootstrap.py --depth 420
+python scripts/run_validation.py
+python scripts/train_forecast.py
+```
+
 首次加载会抓取全市场行情，可能需要 40–120 秒。之后会复用缓存。页面 URL 形如：
 
 ```text
@@ -65,7 +73,8 @@ https://<app-name>.streamlit.app
 ## 3. 手机使用建议
 
 - 首屏“总览”看两个榜单 Top 3；点“潜在投机榜 / 活跃投机榜”看完整表格；
-- 表格可横向滑动；点“个股详情”查看分项条形图、价格/均线、风险标签；
+- 表格可横向滑动；点“个股详情”查看六维/六格检查、概率/目标价/起爆窗口、价格/均线、风险标签；
+- 活跃榜的“每日筛子 A/B/C”和“宏观 / 方法”页的“自我学习与概率校准”需要展开查看；
 - 页面顶部必须核对 **信号基准日** 与 **快照时间**；
 - 出现“使用缓存/内置离线数据”时，说明实时接口异常，不要把它当作盘中实时信号；
 - 侧栏“刷新行情（清空缓存）”会清空服务端缓存并重新抓取；
@@ -131,6 +140,8 @@ python scripts/scan.py --n 12 --depth 300
 | `ModuleNotFoundError: altair` | 极简环境缺少 Altair。确认仓库根目录 `requirements.txt` 包含 `altair>=5,<7`，然后 Reboot app |
 | 页面空白/一直转圈 | 查看 Cloud 日志；可能是首次抓行情较慢，或接口被限流 |
 | 提示 `data/bootstrap` 缺失 | 本地执行 `python scripts/build_bootstrap.py` 并提交 `data/bootstrap/` |
+| 概率/起爆窗口一直显示冷启动 | 本地执行 `python scripts/train_forecast.py` 并提交 `data/learning/forecast_params.json`；学习校准需要用户账本满 20 条已结算样本 |
+| 学习账本重启后消失 | Streamlit 免费实例文件系统不持久；请在“宏观 / 方法”页导出 CSV，重启后导入 |
 | 时区/信号日不对 | 程序按 Asia/Shanghai 判断 15:10 收盘确认；云端 UTC 不影响 |
 | 表格/图表在手机上太窄 | 表格横向滑动；详情页图表建议竖屏查看 |
 | 想换端口 | `streamlit run app.py --server.port 8502` |

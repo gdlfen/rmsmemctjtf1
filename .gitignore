@@ -17,6 +17,8 @@ env/
 # 本地缓存与报告
 data/cache/*
 !data/cache/.gitkeep
+data/learning/ledger.json
+data/learning/calibration.json
 reports/*
 !reports/.gitkeep
 *.log

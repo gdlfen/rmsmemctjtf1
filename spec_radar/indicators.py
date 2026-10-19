@@ -93,6 +93,14 @@ def technical_features(
         df["amount"] = df["volume"] * 100.0 * (df["open"].fillna(df["close"]) + df["close"]) / 2.0
     else:
         df["amount"] = df["amount"].fillna(df["volume"] * 100.0 * df["close"])
+    # 备用源（尤其腾讯科创板/创业板）有时把成交量给成“股”而不是“手”。
+    # 用流通股本反推换手：若近 60 日中位换手 > 200%，几乎可以确定单位是股，整体除以 100。
+    if float_shares and float_shares > 0 and len(df):
+        raw_turnover = df["volume"].to_numpy(dtype=float) * 100.0 / float(float_shares)
+        recent = raw_turnover[-60:]
+        if np.isfinite(recent).any() and float(np.nanmedian(recent)) > 2.0:
+            df["volume"] = df["volume"] / 100.0
+            df["amount"] = df["amount"] / 100.0
     if df["turnover"].isna().all() and float_shares and float_shares > 0:
         df["turnover"] = df["volume"] * 100.0 / float(float_shares) * 100.0
     df["turnover"] = df["turnover"].fillna(0.0)
@@ -292,12 +300,30 @@ def technical_features(
 
     # 涨跌停/极端日
     lim = float(limit_pct)
-    out["limit_up20"] = float(np.nansum(pct[-20:] >= lim - 0.0025)) if n >= 20 else np.nan
-    out["limit_up60"] = float(np.nansum(pct[-60:] >= lim - 0.0025)) if n >= 60 else np.nan
+    limit_flags = pct >= lim - 0.0025
+    out["limit_up20"] = float(np.nansum(limit_flags[-20:])) if n >= 20 else np.nan
+    out["limit_up60"] = float(np.nansum(limit_flags[-60:])) if n >= 60 else np.nan
     out["limit_down20"] = float(np.nansum(pct[-20:] <= -lim + 0.0025)) if n >= 20 else np.nan
     out["big_down5"] = float(np.nansum(pct[-5:] <= -0.05)) if n >= 5 else np.nan
     out["big_up5"] = float(np.nansum(pct[-5:] >= 0.05)) if n >= 5 else np.nan
     out["max_day_gain20"] = float(np.nanmax(pct[-20:])) if n >= 20 else np.nan
+    out["limit_up_today"] = float(limit_flags[-1]) if n else np.nan
+    out["prev_limit_up"] = float(limit_flags[-2]) if n >= 2 else np.nan
+    board_count = 0
+    for flag in limit_flags[::-1]:
+        if bool(flag):
+            board_count += 1
+        else:
+            break
+    out["consecutive_limit_up"] = float(min(board_count, 20))
+    out["first_board"] = float(bool(limit_flags[-1]) and not bool(limit_flags[-2])) if n >= 2 else np.nan
+    out["limit_up_days10"] = float(np.nansum(limit_flags[-10:])) if n >= 10 else np.nan
+    prev_close = close[-2] if n >= 2 else close[-1]
+    out["amplitude_today"] = float((high[-1] - low[-1]) / max(prev_close, EPS))
+    out["turnover_today"] = float(turnover[-1]) if n else np.nan
+    out["volume_ratio_5"] = (
+        float(volume[-1] / max(float(np.nanmean(volume[-6:-1])), EPS)) if n >= 6 else np.nan
+    )
 
     # MACD 柱（归一化）
     if n >= 35:

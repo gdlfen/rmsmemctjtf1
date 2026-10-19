@@ -68,3 +68,16 @@ def test_compute_feature_frame_multi_stock():
 def test_invalid_short_frame_raises():
     with pytest.raises(ValueError):
         technical_features(make_kline(n=10))
+
+
+def test_volume_unit_normalization_for_star_fallback():
+    """腾讯科创板 K 线可能把成交量给成“股”，应能按流通股本自动修正。"""
+    df = make_kline(n=180)
+    df["volume"] = 4_000_000.0  # 股，而不是手
+    df["turnover"] = np.nan
+    df["amount"] = df["volume"] * df["close"]  # 元
+    float_shares = 160_000_000.0
+    f = technical_features(df, benchmark=df, limit_pct=0.20, float_shares=float_shares)
+    expected_turnover = 4_000_000.0 / float_shares
+    assert f["turnover_mean20"] == pytest.approx(expected_turnover, rel=0.05)
+    assert f["amount_mean20"] < 4_000_000.0 * float(df["close"].max())

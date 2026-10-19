@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
@@ -12,6 +13,17 @@ from typing import Any, Callable, Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from .altdata import (
+    AltDataClient,
+    AnnBundle,
+    LimitUpBundle,
+    LhbBundle,
+    apply_announcements,
+    market_sentiment,
+    merge_announcements,
+    merge_lhb,
+    merge_limitup,
+)
 from .config import (
     ScanSettings,
     load_macro_playbook,
@@ -26,6 +38,9 @@ from .datasource import (
     china_now,
     determine_signal_date,
 )
+from .forecast import load_params as load_forecast_params, predict_forecasts
+from .framework import add_active_framework, add_potential_framework, build_daily_screens
+from .learning import apply_calibration, load_calibration
 from .indicators import compute_feature_frame
 from .macro import build_macro_context
 from .scoring import (
@@ -147,6 +162,34 @@ def run_scan(
     if features.empty:
         raise DataError("没有足够的日 K 计算特征，请稍后重试或减小扫描范围")
 
+    # 短线辅助数据：涨停池（封单/连板）、龙虎榜。
+    # 若涨停池日期不是信号日（盘中常见），只用于展示市场温度，绝不并入信号日的打分。
+    alt = AltDataClient(workers=min(8, int(model_cfg.get("scan", {}).get("max_workers", 20))))
+    limit_bundle = LimitUpBundle(pd.DataFrame(), None)
+    lhb_bundle = LhbBundle(pd.DataFrame(), pd.DataFrame())
+    sentiment = market_sentiment(limit_bundle, snapshot)
+    if str(os.environ.get("SPEC_RADAR_OFFLINE", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        _report(progress, "短线数据", 0.71, "涨停池 / 龙虎榜 / 板块联动")
+        try:
+            limit_bundle = alt.get_limitup(signal_date)
+            if limit_bundle.warning:
+                warnings.append(limit_bundle.warning)
+            if limit_bundle.qdate == signal_date and not limit_bundle.pool.empty:
+                features = merge_limitup(features, limit_bundle)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"涨停池不可用：{exc}")
+        try:
+            lhb_bundle = alt.get_lhb(signal_date)
+            if lhb_bundle.warning:
+                warnings.append(lhb_bundle.warning)
+            if not lhb_bundle.daily.empty:
+                features = merge_lhb(features, lhb_bundle)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"龙虎榜不可用：{exc}")
+        sentiment = market_sentiment(limit_bundle, snapshot)
+    else:
+        warnings.append("离线模式：跳过涨停池与龙虎榜实时接口")
+
     # 行业/概念指数 K 线：只抓候选股涉及的板块，严格截至信号日。
     _report(progress, "板块", 0.78, "计算行业与概念板块的 20/60 日相对强弱")
     candidate_snap = snapshot[snapshot["code"].isin(valid_codes)]
@@ -230,6 +273,72 @@ def run_scan(
     if len(active) < min(settings.n_active * 2, 20):
         warnings.append(f"活跃榜合格样本仅 {len(active)} 只，排名稳定性有限")
 
+    # 公告红线：只核查两个榜单的前若干名，避免全市场数百次请求。
+    ann_bundle = AnnBundle(pd.DataFrame())
+    ann_checked = 0
+    if str(os.environ.get("SPEC_RADAR_OFFLINE", "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        _report(progress, "公告", 0.93, "核查前排名单的澄清/减持/立案等红线")
+        try:
+            top_codes = set()
+            for frame in (potential, active):
+                if not frame.empty:
+                    n = min(len(frame), max(40, int(settings.n_potential)))
+                    top_codes.update(frame.head(n)["code"].astype(str).tolist())
+            if top_codes:
+                ann_bundle = alt.get_announcements(top_codes, signal_date)
+                if ann_bundle.warning:
+                    warnings.append(ann_bundle.warning)
+                if not ann_bundle.flags.empty:
+                    ann_checked = int(ann_bundle.flags["ann_checked"].sum()) if "ann_checked" in ann_bundle.flags else len(ann_bundle.flags)
+                    potential, hard_p = apply_announcements(potential, ann_bundle)
+                    active, hard_a = apply_announcements(active, ann_bundle)
+                    if hard_p or hard_a:
+                        warnings.append(f"公告红线剔除：潜在 {len(hard_p)} 只、活跃 {len(hard_a)} 只（已从榜单移除）")
+                    potential = potential[~potential.get("ann_hard_excluded", False)].copy()
+                    active = active[~active.get("ann_hard_excluded", False)].copy()
+                    for frame in (potential, active):
+                        if not frame.empty:
+                            frame["rank"] = np.arange(1, len(frame) + 1)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"公告核查失败，榜单未做公告红线剔除：{exc}")
+    else:
+        warnings.append("离线模式：跳过公告红线核查")
+
+    _report(progress, "框架/预测", 0.96, "六维检查、概率、目标价与起爆窗口")
+    filtered = {"potential": 0, "active": 0}
+    if not potential.empty:
+        potential = add_potential_framework(potential)
+        potential["score"] = (potential["score"] + 1.5 * (potential["setup_score"] - 8)).clip(0, 100)
+        before = len(potential)
+        potential = potential[potential["setup_score"] >= 9].copy()
+        filtered["potential"] = before - len(potential)
+        potential = potential.sort_values(["score", "confidence", "amount20_yi"], ascending=[False, False, False]).reset_index(drop=True)
+        potential["rank"] = np.arange(1, len(potential) + 1)
+    if not active.empty:
+        active = add_active_framework(active)
+        active["score"] = (active["score"] + 0.8 * (active["check_count"] - 5)).clip(0, 100)
+        before = len(active)
+        active = active[(active["check_count"] >= 5) & active["check_safety"]].copy()
+        filtered["active"] = before - len(active)
+        active = active.sort_values(["score", "confidence", "amount20_yi"], ascending=[False, False, False]).reset_index(drop=True)
+        active["rank"] = np.arange(1, len(active) + 1)
+    if filtered["potential"] or filtered["active"]:
+        warnings.append(
+            f"框架门槛剔除：潜在 {filtered['potential']} 只（六维<9分）、"
+            f"活跃 {filtered['active']} 只（六格<5项或安全红线）"
+        )
+    forecast_params = load_forecast_params()
+    if not potential.empty:
+        potential = predict_forecasts(potential, "potential", forecast_params)
+    if not active.empty:
+        active = predict_forecasts(active, "active", forecast_params)
+    learning_cal = load_calibration()
+    if not potential.empty:
+        potential = apply_calibration(potential, "potential", learning_cal)
+    if not active.empty:
+        active = apply_calibration(active, "active", learning_cal)
+    screens = build_daily_screens(features, snapshot, {"potential": potential, "active": active})
+
     elapsed = time.time() - started
     meta = {
         "signal_date": signal_date.strftime("%Y-%m-%d"),
@@ -256,6 +365,14 @@ def run_scan(
             else "东方财富公开行情 + 腾讯/新浪备用 K 线"
         ),
         "cache_dir": str(client.cache.directory),
+        "sentiment": sentiment,
+        "limitup_rows": int(len(limit_bundle.pool)) if not limit_bundle.pool.empty else 0,
+        "lhb_rows": int(len(lhb_bundle.daily)) if not lhb_bundle.daily.empty else 0,
+        "ann_checked": int(ann_checked),
+        "forecast_calibrated": bool((forecast_params.get("models") or {}).get("potential", {}).get("ok")),
+        "forecast_auc_potential": (forecast_params.get("models") or {}).get("potential", {}).get("auc_hit"),
+        "forecast_auc_active": (forecast_params.get("models") or {}).get("active", {}).get("auc_hit"),
+        "learning_calibrated": bool((learning_cal.get("models") or {}).get("potential", {}).get("ok")),
     }
     _report(progress, "完成", 1.0, f"潜在 {len(potential)} 只 / 活跃 {len(active)} 只")
     return {
@@ -266,4 +383,11 @@ def run_scan(
         "macro": macro,
         "meta": meta,
         "industry_stats": industry_stats,
+        "limitup": limit_bundle,
+        "lhb": lhb_bundle,
+        "sentiment": sentiment,
+        "announcements": ann_bundle,
+        "screens": screens,
+        "forecast_params": forecast_params,
+        "learning_calibration": learning_cal,
     }

@@ -31,6 +31,15 @@ from spec_radar.config import (  # noqa: E402
     load_model_config,
 )
 from spec_radar.datasource import CN_TZ, china_now  # noqa: E402
+from spec_radar.learning import (  # noqa: E402
+    calibrate,
+    evaluate_ledger,
+    import_ledger_csv,
+    ledger_csv,
+    load_calibration,
+    load_ledger,
+    record_predictions,
+)
 from spec_radar.pipeline import run_scan  # noqa: E402
 from spec_radar.scoring import COMPONENT_LABELS, COMPONENT_NOTES  # noqa: E402
 
@@ -43,6 +52,7 @@ st.set_page_config(
 
 MODEL_COLORS = {"potential": "#d97706", "active": "#c2410c"}
 MODEL_NAMES = {"potential": "潜在投机", "active": "活跃投机"}
+UI_CACHE_VERSION = "2026.10-r2-forecast"
 
 
 # --------------------------------------------------------------------------- 样式
@@ -125,7 +135,7 @@ def inject_css() -> None:
 
 # --------------------------------------------------------------------------- 缓存
 @st.cache_data(ttl=1800, max_entries=4, show_spinner=False)
-def cached_scan(settings_json: str, config_sig: str, session_key: str):
+def cached_scan(settings_json: str, config_sig: str, session_key: str, cache_version: str = UI_CACHE_VERSION):
     # 注意：缓存函数内部不要调用任何 st.* 元素（包括进度条回调），
     # 否则第二次会话回放缓存时会触发 CacheReplayClosureError。
     raw = json.loads(settings_json)
@@ -202,6 +212,9 @@ def cards_html(df: pd.DataFrame, model_key: str, n: int = 3) -> str:
     <div class="pc-metric">流通市值<b>{num(row.get('float_mcap_yi'), 0, '亿')}</b></div>
     <div class="pc-metric">20日均额<b>{num(row.get('amount20_yi'), 1, '亿')}</b></div>
     <div class="pc-metric">换手(20)<b>{num(row.get('turnover20_pct'), 1, '%')}</b></div>
+    <div class="pc-metric">命中概率<b>{pct(row.get('p_hit_10d'))}</b></div>
+    <div class="pc-metric">目标高价<b>{num(row.get('target_high'), 2)}</b></div>
+    <div class="pc-metric">起爆窗口<b>{esc(row.get('launch_window') or '—')}</b></div>
     <div class="pc-metric">风险<b>{esc(row.get('risk_level'))}</b></div>
   </div>
   <div class="pc-risk">风险：{risk}</div>
@@ -221,6 +234,12 @@ def metric_grid(items: list[tuple[str, str, str]]) -> str:
 
 def table_view(df: pd.DataFrame, n: int) -> pd.DataFrame:
     d = df.head(int(n)).copy()
+    if "setup_score" in d:
+        framework = d["setup_score"].astype(int).astype(str) + "分/" + d["setup_grade"].astype(str)
+    elif "check_count" in d:
+        framework = d["check_count"].astype(int).astype(str) + "项/" + d["check_grade"].astype(str)
+    else:
+        framework = pd.Series("—", index=d.index)
     out = pd.DataFrame({
         "#": d["rank"].astype(int),
         "代码": d["code"],
@@ -236,6 +255,10 @@ def table_view(df: pd.DataFrame, n: int) -> pd.DataFrame:
         "流通市值(亿)": d["float_mcap_yi"].round(1),
         "20日均额(亿)": d["amount20_yi"].round(2),
         "换手20(%)": d["turnover20_pct"].round(1),
+        "命中概率": d["p_hit_10d"].map(lambda x: pct(x)) if "p_hit_10d" in d else "—",
+        "目标高价": d["target_high"].map(lambda x: num(x, 2)) if "target_high" in d else "—",
+        "起爆窗口": d["launch_window"] if "launch_window" in d else "—",
+        "框架": framework,
         "PE(TTM)": d["pe_ttm"].map(lambda x: num(x, 1)),
         "风险提示": d["risk_flags_text"],
     })
@@ -256,10 +279,18 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
         "theme_fit": "主题契合度", "concept_day": "概念当日涨幅",
         "concept_20d": "概念20日涨幅", "ind_ret20": "行业20日涨幅",
         "risk_flags_text": "风险提示", "penalty": "风险罚分", "signal_date": "信号日",
+        "setup_score": "六维分", "setup_grade": "六维状态", "check_count": "六格通过数",
+        "check_grade": "六格状态", "p_hit_10d": "命中概率", "p_up_10d": "上涨概率",
+        "target_high_low": "目标价下沿", "target_high": "目标价中枢", "target_high_bull": "目标价上沿",
+        "target_upside_pct": "目标空间", "launch_window": "起爆窗口",
+        "expected_launch_days": "预期起爆日", "forecast_quality": "预测质量",
+        "ann_red_text": "公告红线", "ann_good_text": "公告催化",
+        "lhb_net_yi": "龙虎榜净买入(亿)", "consecutive_limit_up": "连板数",
     }
     component_cols = {c: f"分项-{COMPONENT_LABELS.get(c.replace('c_', ''), c)}" for c in d.columns if c.startswith("c_")}
     rename.update(component_cols)
-    for col in ("ret20", "ret60", "ret120", "ret250", "turnover20_pct", "theme_fit", "concept_day", "concept_20d", "ind_ret20"):
+    for col in ("ret20", "ret60", "ret120", "ret250", "turnover20_pct", "theme_fit", "concept_day",
+                "concept_20d", "ind_ret20", "p_hit_10d", "p_up_10d", "target_upside_pct"):
         if col in d:
             d[col] = (d[col] * 100).round(2)
     cols = [c for c in rename if c in d.columns] + ["模型"]
@@ -409,9 +440,18 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
             ("PE(TTM)", num(row.get("pe_ttm"), 1), "PB " + num(row.get("pb"), 2)),
             ("净利同比", pct(row.get("profit_yoy")), "营收同比 " + pct(row.get("rev_yoy"))),
             ("风险罚分", num(row.get("penalty"), 1), "稳健度 " + num(row.get("confidence"), 0)),
+            ("命中概率", pct(row.get("p_hit_10d")), f"10日内最大涨幅≥{pct(row.get('forecast_threshold'))}"),
+            ("上涨概率", pct(row.get("p_up_10d")), "10日收盘为正"),
+            ("目标高价", num(row.get("target_high"), 2), f"区间 {num(row.get('target_high_low'),2)}–{num(row.get('target_high_bull'),2)}"),
+            ("起爆窗口", str(row.get("launch_window") or "—"), f"预期约 {num(row.get('expected_launch_days'),0)} 日 · 质量 {row.get('forecast_quality','低')}"),
+            ("连板/封单", num(row.get("consecutive_limit_up", 0), 0) + "板", "封单比 " + pct(row.get("seal_ratio"))),
+            ("龙虎榜净买", num(row.get("lhb_net_yi"), 2, "亿"), "游资席 " + num(row.get("lhb_hot_seat_count"), 0)),
         ]),
         unsafe_allow_html=True,
     )
+    st.caption("概率、目标价和起爆窗口是历史统计倾向，不是承诺；详见“宏观 / 方法”页的模型验证。")
+    if row.get("launch_window_probs"):
+        st.caption("起爆窗口概率分布：" + str(row.get("launch_window_probs")))
     c1, c2 = st.columns([1, 1.45], gap="medium")
     with c1:
         st.markdown("#### 分项画像")
@@ -419,6 +459,33 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
     with c2:
         st.markdown("#### 价格与均线")
         st.altair_chart(plot_price(row, kline), width="stretch")
+    st.markdown("#### 框架检查")
+    if model_key == "potential":
+        st.markdown(
+            f"<div class='reason'><b>潜在六维：{int(row.get('setup_score',0))}/12 · {esc(row.get('setup_grade'))}</b><br/>"
+            f"{esc(row.get('setup_dims') or '—')}<br/>"
+            "题材2分=新/大/难证伪且有板块；盘子2分=50–120亿；位置2分=回撤20–40%且未再大涨；"
+            "量价2分=压缩+吸筹；资金2分=CMF/OBV/量比共振；安全2分=无ST/公告红线/重大风险。</div>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"<div class='reason'><b>活跃六格：{int(row.get('check_count',0))}/6 · {esc(row.get('check_grade'))}</b><br/>"
+            f"{esc(row.get('check_text') or '—')}<br/>"
+            "六格通过≥5项才进入榜单；安全红线独立一票否决。缺失数据不自动算通过。</div>",
+            unsafe_allow_html=True,
+        )
+    ann_red = str(row.get("ann_red_text") or "")
+    ann_good = str(row.get("ann_good_text") or "")
+    ann_checked = bool(row.get("ann_checked", False))
+    st.markdown(
+        f"<div class='warnbox'><b>公告核查：</b>{'已核查' if ann_checked else '未核查/接口不可用'}"
+        f"{'；红线：' + esc(ann_red) if ann_red else '；未命中主要红线关键词'}"
+        f"{'；催化：' + esc(ann_good) if ann_good else ''}<br/>"
+        "关键词筛查不能替代阅读原文；澄清、减持、立案、问询等公告必须人工复核。"
+        "股东户数、解禁、质押、分时封板质量、席位次日反手等字段未完整自动接入，仍需人工核对。</div>",
+        unsafe_allow_html=True,
+    )
     st.markdown("#### 模型解释")
     for line in reason_text(row, model_key):
         st.markdown(f"<div class='reason'>{line}</div>", unsafe_allow_html=True)
@@ -452,6 +519,20 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
         unsafe_allow_html=True,
     )
     st.caption("“观察位”只是模型计算出的价格参考，不是买卖指令。")
+    stop_ref = min(
+        [_v for _v in (pd.to_numeric(pd.Series([row.get("ma20"), row.get("ma60"), low60]), errors="coerce").dropna().tolist()) if _v > 0],
+        default=np.nan,
+    )
+    st.markdown(
+        f"""<div class="warnbox">
+        <b>退出纪律模板（非个性化建议）：</b><br/>
+        单只仓位建议不超过总资金的 10%–15%，单题材合计不超过 30%；先定止损再考虑进场。<br/>
+        参考风控位：<b>{num(stop_ref, 2)}</b>（MA20/MA60/60日低点中较低者）。跌破后先减仓/离场，不用补仓摊低成本。<br/>
+        逻辑失效条件：公司澄清“无相关业务”、板块整体退潮、公告出现减持/立案/问询、或放量长上影后次日不能修复。<br/>
+        盈利后把止损移到成本价附近，让利润奔跑；不把“潜在”熬成“深套”。预测目标价 <b>{num(row.get('target_high'),2)}</b> 只是统计区间，不是必达目标。
+        </div>""",
+        unsafe_allow_html=True,
+    )
     with st.expander("查看分项贡献与原始特征"):
         comp_rows = []
         for key in (["policy", "compression", "accumulation", "base", "fundamental", "neglect", "elasticity", "regime"]
@@ -473,7 +554,52 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
         st.dataframe(raw, width="stretch")
 
 
-def render_macro(result: dict, playbook: dict) -> None:
+def render_screens(result: dict) -> None:
+    screens = result.get("screens", {}) or {}
+    st.markdown("### 今日筛子（按信号日量价）")
+    st.caption("基于本次扫描的粗筛候选池与信号日截面，不是全市场实时；首板/连板来自日 K 的涨跌停判定，封单额/开板次数仅在涨停池与信号日一致时可用。")
+    labels = {
+        "首板启动池": "筛子 A · 首板启动（低位首板赔率最高）",
+        "连板确认池": "筛子 B · 2–5 连板（只做辨识度，不追高位）",
+        "高弹性分歧池": "筛子 C · 高换手/高振幅/20日未大涨（二波候选）",
+    }
+    for key, label in labels.items():
+        df = screens.get(key)
+        st.markdown(f"#### {label}")
+        if df is None or df.empty:
+            st.caption("当前无符合条件的标的。")
+            continue
+        show = df.head(12).copy()
+        cols = []
+        for col, title in (
+            ("code", "代码"), ("name", "名称"), ("industry", "行业"),
+            ("board_count", "连板"), ("consecutive_limit_up", "连板(K线)"),
+            ("float_mcap_yi", "流通市值(亿)"), ("turnover_today", "今日换手"),
+            ("amplitude_today", "今日振幅"), ("ret20", "20日涨幅"),
+            ("amount20_yi" if "amount20_yi" in show else "avg_amount20_yi", "20日均额(亿)"),
+        ):
+            if col in show:
+                show[col] = show[col]
+                cols.append(col)
+        if not cols:
+            continue
+        table = show[cols].copy()
+        rename = {"code": "代码", "name": "名称", "industry": "行业", "board_count": "封板连板",
+                  "consecutive_limit_up": "K线连板", "float_mcap_yi": "流通市值(亿)",
+                  "turnover_today": "今日换手", "amplitude_today": "今日振幅", "ret20": "20日涨幅",
+                  "amount20_yi": "20日均额(亿)", "avg_amount20_yi": "20日均额(亿)"}
+        table = table.rename(columns=rename)
+        for c in ("今日换手", "今日振幅", "20日涨幅"):
+            if c in table:
+                table[c] = table[c].map(lambda x: pct(x))
+        for c in ("流通市值(亿)", "20日均额(亿)"):
+            if c in table:
+                table[c] = table[c].map(lambda x: num(x, 1))
+        st.dataframe(table, hide_index=True, width="stretch")
+    st.caption("筛子只做“候选缩圈”，不等于买点；需再经过六格与公告红线检查。")
+
+
+def render_macro(result: dict, playbook: dict, n_pot: int, n_act: int) -> None:
     macro = result["macro"]
     st.markdown("### 市场状态与宏观情景")
     st.markdown(
@@ -557,6 +683,8 @@ def render_macro(result: dict, playbook: dict) -> None:
         unsafe_allow_html=True,
     )
     render_validation()
+    render_forecast_method(result)
+    render_learning(result, n_pot, n_act)
 
 
 def render_validation() -> None:
@@ -604,6 +732,114 @@ def render_validation() -> None:
             with st.expander(f"{title} · 分调仓日明细"):
                 st.dataframe(show, hide_index=True, width="stretch")
     st.caption("验证结论只用于判断因子方向与稳定性；样本短、风格单一时，历史表现不能外推。")
+
+
+def render_forecast_method(result: dict) -> None:
+    st.markdown("### 概率 / 目标价 / 起爆窗口")
+    st.caption(
+        "定义：p_hit_10d = 未来 10 个交易日最高价相对信号收盘的涨幅达到阈值的概率；"
+        "p_up_10d = 10 日收盘收益为正的概率；目标价为历史 MFE/ATR 分位数映射；"
+        "起爆窗口为“突破前 20 日高点或涨停”首次出现的天数分布。"
+    )
+    st.caption("注意：起爆窗口是条件分布的概率标签；“20+”表示样本中 20 日内未出现该定义的突破/涨停，不等于不会涨。")
+    params = result.get("forecast_params", {}) or {}
+    rows = []
+    for key, label, threshold in (("potential", "潜在", "8%"), ("active", "活跃", "10%")):
+        m = (params.get("models") or {}).get(key, {})
+        rows.append({
+            "模型": label, "阈值": threshold, "训练样本": m.get("rows", "—"),
+            "验证 Auc": num(m.get("auc_hit"), 3), "Brier": num(m.get("brier_hit"), 3),
+            "基准命中率": pct(m.get("positive_rate")), "说明": "候选池历史面板；样本短、幸存者偏差",
+        })
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+    st.markdown(
+        "<div class='warnbox'>概率不是“准确率保证”。当前验证 AUC：潜在约 0.70、活跃约 0.59，"
+        "仅略优于随机；目标价是区间中枢而非必达价，起爆窗口受大盘情绪影响可能整体失效。"
+        "若自学习账本样本不足 20 条，页面显示“冷启动”，表示尚未做概率校准。</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_learning(result: dict, n_pot: int, n_act: int) -> None:
+    st.markdown("### 自我学习与概率校准")
+    st.caption(
+        "只校准概率与目标价，不自动改写特征权重。流程：记录预测 → 等 10 个交易日 → 用真实最大涨幅/收盘收益结算 → "
+        "用已结算样本校正概率与目标价倍数。样本不足 20 条时不会应用校准。"
+    )
+    ledger = load_ledger()
+    cal = result.get("learning_calibration") or load_calibration()
+    evaluated = sum(1 for x in ledger if x.get("evaluated"))
+    pending = len(ledger) - evaluated
+    p_cal = (cal.get("models") or {}).get("potential", {})
+    a_cal = (cal.get("models") or {}).get("active", {})
+    st.markdown(
+        metric_grid([
+            ("账本记录", num(len(ledger), 0), "当前实例"),
+            ("已结算", num(evaluated, 0), f"待结算 {pending}"),
+            ("潜在校准", "已启用" if p_cal.get("ok") else "样本不足", f"n={p_cal.get('n',0)}"),
+            ("活跃校准", "已启用" if a_cal.get("ok") else "样本不足", f"n={a_cal.get('n',0)}"),
+        ]),
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if st.button("记录当前 Top N", width="stretch", key="learn_record"):
+            added = record_predictions(result, n_pot, n_act)
+            st.success(f"新增 {added} 条记录")
+            st.rerun()
+    with c2:
+        if st.button("评估已到期", width="stretch", key="learn_eval"):
+            status = evaluate_ledger(result.get("kline", pd.DataFrame()))
+            st.success(f"新增结算 {status.get('evaluated',0)} 条，待结算 {status.get('pending',0)} 条")
+            st.rerun()
+    with c3:
+        if st.button("重新校准", width="stretch", key="learn_cal"):
+            out = calibrate()
+            st.success(f"已更新：潜在 {out.get('models',{}).get('potential',{}).get('n',0)} 条 / "
+                       f"活跃 {out.get('models',{}).get('active',{}).get('n',0)} 条")
+            st.rerun()
+    with c4:
+        st.download_button(
+            "导出账本 CSV", ledger_csv(), file_name="spec_radar_ledger.csv",
+            mime="text/csv", width="stretch", key="learn_dl",
+        )
+    up = st.file_uploader("导入账本 CSV（用于换机/云端重启后续接）", type=["csv"], key="learn_upload")
+    if up is not None and st.button("确认导入", key="learn_import"):
+        added = import_ledger_csv(up.getvalue())
+        st.success(f"导入 {added} 条")
+        st.rerun()
+
+    rows = []
+    for key, m in (("潜在", p_cal), ("活跃", a_cal)):
+        rows.append({
+            "模型": key, "样本": m.get("n", 0), "命中率": pct(m.get("hit_rate")),
+            "平均预测概率": pct(m.get("mean_p_hit")), "Brier": num(m.get("brier"), 3),
+            "概率校准因子": num(m.get("probability_factor"), 2),
+            "目标价因子": num(m.get("target_factor"), 2),
+            "状态": m.get("note", "—"),
+        })
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+    if ledger:
+        recent = pd.DataFrame(ledger[-20:][::-1])
+        show_cols = [c for c in ("signal_date", "model", "code", "name", "score", "p_hit",
+                                 "target_high", "launch_window", "evaluated", "mfe10", "ret10",
+                                 "hit_mfe", "launch_days") if c in recent.columns]
+        recent = recent[show_cols]
+        for c in ("p_hit",):
+            if c in recent:
+                recent[c] = recent[c].map(lambda x: pct(x))
+        for c in ("mfe10", "ret10"):
+            if c in recent:
+                recent[c] = recent[c].map(lambda x: pct(x))
+        st.caption("最近 20 条预测记录（原始账本）")
+        st.dataframe(recent, hide_index=True, width="stretch")
+    st.caption(
+        "Streamlit 免费实例重启后本地账本可能丢失，请定期导出；导入后再点“评估/重新校准”。"
+        "这里的学习只是概率校准，不保证准确率提升。"
+    )
 
 
 # --------------------------------------------------------------------------- 侧栏
@@ -662,7 +898,7 @@ def sidebar(settings: ScanSettings) -> tuple[ScanSettings, int, int, bool]:
         "“投机”意味着高波动、高回撤与流动性风险，任何排名都可能失效。</div>",
         unsafe_allow_html=True,
     )
-    st.sidebar.caption("模型 2026.10-r1 · 数据：东方财富 / 腾讯 / 新浪")
+    st.sidebar.caption("模型 2026.10-r2 · 数据：东方财富 / 腾讯 / 新浪")
     return new_settings, int(n_pot), int(n_act), bool(excl_loss)
 
 
@@ -706,7 +942,7 @@ def main() -> None:
     result = None
     try:
         with st.spinner("正在抓取行情并计算双轨模型（首次约 40–120 秒）…"):
-            result = cached_scan(arg_json, config_signature(), session_key)
+            result = cached_scan(arg_json, config_signature(), session_key, UI_CACHE_VERSION)
     except Exception as exc:  # noqa: BLE001
         st.error(f"扫描失败：{type(exc).__name__}: {exc}")
         st.markdown(
@@ -734,6 +970,7 @@ def main() -> None:
   <span class="badge">信号基准 · {esc(meta.get('signal_date'))} 收盘</span>
   <span class="badge gray">快照 · {esc(meta.get('snapshot_time'))}</span>
   <span class="badge">市场 · {esc(macro.get('label'))}（{num(macro.get('risk_appetite'),0)}）</span>
+  <span class="badge">情绪 · {esc((meta.get('sentiment') or {}).get('label','未知'))}</span>
   <span class="badge green">全市场 {int(meta.get('universe_total',0)):,} 只 · 基础域 {int(meta.get('eligible_base',0)):,}</span>
   <span class="badge gray">耗时 {num(meta.get('elapsed_sec'),1)}s · 模型 {esc(meta.get('model_version'))}</span>
 </div>
@@ -775,6 +1012,19 @@ def main() -> None:
             ]),
             unsafe_allow_html=True,
         )
+        st.markdown("#### 短线情绪")
+        sent = result.get("sentiment", {}) or {}
+        st.markdown(
+            metric_grid([
+                ("情绪", str(sent.get("label", "未知")), f"来源 {sent.get('source','snapshot')}"),
+                ("涨停家数", num(sent.get("limit_up_count", 0), 0), "全市场涨停池/快照"),
+                ("最高板", num(sent.get("max_board", 0), 0), "连板高度"),
+                ("涨家占比", pct(sent.get("up_ratio")), "快照口径"),
+            ]),
+            unsafe_allow_html=True,
+        )
+        if int(sent.get("limit_up_count", 0)) == 0:
+            st.caption("涨停池与信号日不一致时，模型不会把盘中/未来涨停数据并入信号；情绪分仅作环境参考。")
         st.caption(f"合格样本：潜在 {len(pot)} 只 / 活跃 {len(act)} 只 · 数据源：{meta.get('source')}")
 
     with tab_pot:
@@ -803,6 +1053,16 @@ def main() -> None:
     with tab_act:
         st.markdown("### 活跃投机榜")
         st.caption("定义：已经被资金选中、处于题材/趋势/量能共振阶段，具备短线博弈与接力价值。要求站上 MA20、20 日动量为正、换手不低于 1.5%，并惩罚追高与过热。")
+        screens = result.get("screens", {}) or {}
+        if screens:
+            st.caption(
+                "今日筛子：首板 "
+                f"{len(screens.get('首板启动池', []))} 只 / 连板 "
+                f"{len(screens.get('连板确认池', []))} 只 / 高弹性分歧 "
+                f"{len(screens.get('高弹性分歧池', []))} 只（点下方展开）"
+            )
+        with st.expander("每日筛子 A/B/C（首板 / 连板 / 高弹性分歧）", expanded=False):
+            render_screens(result)
         if act.empty:
             st.info("当前防御/震荡环境下没有达到活跃模型门槛的标的，这是模型的风险控制结果。")
         else:
@@ -827,7 +1087,7 @@ def main() -> None:
         render_detail(result, n_pot, n_act)
 
     with tab_macro:
-        render_macro(result, playbook)
+        render_macro(result, playbook, n_pot, n_act)
         st.markdown("---")
         st.caption(
             f"数据诊断：快照 {meta.get('snapshot_time')} · K线 {meta.get('kline_rows'):,} 行 · "
