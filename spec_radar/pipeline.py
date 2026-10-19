@@ -1,0 +1,269 @@
+# -*- coding: utf-8 -*-
+"""扫描编排：数据抓取 → 特征 → 主题/宏观 → 双模型排序。"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import time
+from datetime import datetime
+from typing import Any, Callable, Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+from .config import (
+    ScanSettings,
+    load_macro_playbook,
+    load_model_config,
+)
+from .datasource import (
+    CN_TZ,
+    BoardBundle,
+    DataError,
+    MarketClient,
+    SnapshotBundle,
+    china_now,
+    determine_signal_date,
+)
+from .indicators import compute_feature_frame
+from .macro import build_macro_context
+from .scoring import (
+    base_eligibility,
+    prefilter_codes,
+    score_model,
+)
+from .themes import (
+    CONCEPT_BLACKLIST,
+    ThemeMapper,
+    attach_theme_features,
+    compute_concept_stats,
+    compute_industry_stats,
+)
+
+LOG = logging.getLogger(__name__)
+Progress = Optional[Callable[[str, float, str], None]]
+
+
+def _report(progress: Progress, stage: str, frac: float, detail: str = "") -> None:
+    LOG.info("%s %.0f%% %s", stage, frac * 100, detail)
+    if progress:
+        try:
+            progress(stage, float(np.clip(frac, 0, 1)), detail)
+        except Exception:
+            pass
+
+
+def _fingerprint(settings: ScanSettings, model_cfg: Dict[str, Any]) -> str:
+    raw = json.dumps(settings.key(), sort_keys=True, ensure_ascii=False) + str(model_cfg.get("version", ""))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _neutral_macro(snapshot: pd.DataFrame, playbook: Dict[str, Any], risk_mode: str) -> Dict[str, Any]:
+    empty = pd.DataFrame(columns=["secid", "date", "close"])
+    return build_macro_context(empty, snapshot, playbook, risk_mode)
+
+
+def run_scan(
+    settings: ScanSettings | None = None,
+    model_cfg: Dict[str, Any] | None = None,
+    playbook: Dict[str, Any] | None = None,
+    progress: Progress = None,
+    force: bool = False,
+) -> Dict[str, Any]:
+    """执行一次完整扫描，返回可 pickle 的结果字典。"""
+    started = time.time()
+    settings = settings or ScanSettings()
+    model_cfg = model_cfg or load_model_config()
+    playbook = playbook or load_macro_playbook()
+    warnings: List[str] = []
+    client = MarketClient(workers=int(model_cfg.get("scan", {}).get("max_workers", 20)))
+
+    _report(progress, "日历", 0.02, "确认最近已收盘交易日")
+    signal_date, probe = determine_signal_date(client, settings.as_of)
+    signal_ts = pd.Timestamp(signal_date)
+
+    _report(progress, "快照", 0.06, "抓取全 A 股行情快照")
+    snap_bundle: SnapshotBundle = client.get_snapshot(force=force)
+    snapshot = snap_bundle.df
+    if snap_bundle.stale:
+        warnings.extend(snap_bundle.warnings or ["快照使用旧缓存"])
+
+    _report(progress, "板块", 0.12, "抓取行业与概念板块")
+    boards: BoardBundle = client.get_boards(force=force)
+    if boards.stale:
+        warnings.extend(boards.warnings or ["板块使用旧缓存"])
+    mapper = ThemeMapper(playbook)
+
+    _report(progress, "粗筛", 0.18, "用快照缩小需要拉取日 K 的股票池")
+    live_snapshot = snap_bundle.fetched_at.astimezone(CN_TZ).date() > signal_date
+    codes, pre_stats = prefilter_codes(
+        snapshot, settings, model_cfg, mapper, signal_ts, adjust_live_snapshot=live_snapshot
+    )
+    if not codes:
+        raise DataError("基础域为空：检查板块筛选、市值/成交额阈值或数据日期")
+    snap_by_code = snapshot.set_index("code")
+    valid_codes = [c for c in codes if c in snap_by_code.index]
+    requests_map = {str(snap_by_code.loc[c, "secid"]): c for c in valid_codes}
+    _report(progress, "日K", 0.24, f"抓取 {len(requests_map)} 只候选股的前复权日 K")
+
+    kline_bundle = client.get_kline_panel(
+        requests_map,
+        signal_date,
+        lmt=int(settings.lookback_bars or 320),
+        force=force,
+    )
+    panel = kline_bundle.frame
+    if kline_bundle.stale:
+        warnings.append("候选股日 K 使用旧缓存/离线数据，信号可能滞后")
+    warnings.extend(kline_bundle.warnings or [])
+    if kline_bundle.failed:
+        warnings.append(f"{len(kline_bundle.failed)} 只候选股日 K 缺失，已从评分中剔除")
+    if kline_bundle.fallback:
+        warnings.append(f"{len(kline_bundle.fallback)} 只股票使用腾讯/新浪备用 K 线，成交额/换手可能为估算值")
+
+    _report(progress, "市场环境", 0.60, "抓取指数与全球/风格代理资产")
+    try:
+        context_bundle = client.get_market_context_panel(signal_date, lmt=320)
+        context_panel = context_bundle.frame
+        if context_bundle.failed:
+            warnings.append(f"市场环境面板缺失 {len(context_bundle.failed)} 个代理资产，按中性处理")
+    except Exception as exc:  # noqa: BLE001
+        context_panel = pd.DataFrame()
+        warnings.append(f"市场环境面板不可用，宏观状态按中性处理：{exc}")
+    macro = build_macro_context(context_panel, snapshot, playbook, settings.risk_mode)
+    warnings.extend(macro.get("warnings", []))
+
+    benchmark = pd.DataFrame()
+    if not context_panel.empty and "secid" in context_panel.columns:
+        benchmark = context_panel[context_panel["secid"] == "1.000001"].copy()
+    if benchmark.empty:
+        benchmark = probe[probe["date"] <= signal_ts].copy()
+        if benchmark.empty:
+            warnings.append("缺少上证指数基准，Beta 按中性处理")
+
+    _report(progress, "特征", 0.68, "计算波动压缩、吸筹、动量、量能等特征")
+    features = compute_feature_frame(panel, benchmark, snapshot, min_bars=60)
+    if features.empty:
+        raise DataError("没有足够的日 K 计算特征，请稍后重试或减小扫描范围")
+
+    # 行业/概念指数 K 线：只抓候选股涉及的板块，严格截至信号日。
+    _report(progress, "板块", 0.78, "计算行业与概念板块的 20/60 日相对强弱")
+    candidate_snap = snapshot[snapshot["code"].isin(valid_codes)]
+    ind_names = sorted(set(candidate_snap["industry"].dropna().astype(str)))
+    concept_names = set()
+    for concepts in candidate_snap["concepts"]:
+        for concept in concepts:
+            if concept not in CONCEPT_BLACKLIST:
+                concept_names.add(concept)
+    ind_lookup = {}
+    if not boards.industry.empty:
+        ind_lookup = {
+            str(row["name"]): str(row["board_code"])
+            for _, row in boards.industry.iterrows()
+            if str(row.get("name", "")).strip() and str(row.get("board_code", "")).strip()
+        }
+    con_lookup = {}
+    if not boards.concept.empty:
+        con_lookup = {
+            str(row["name"]): str(row["board_code"])
+            for _, row in boards.concept.iterrows()
+            if str(row.get("name", "")).strip() and str(row.get("board_code", "")).strip()
+        }
+    board_codes = set()
+    for name in ind_names:
+        if name in ind_lookup:
+            board_codes.add(ind_lookup[name])
+    for name in concept_names:
+        if name in con_lookup:
+            board_codes.add(con_lookup[name])
+    board_requests = {f"90.{code}": "" for code in sorted(board_codes)}
+    industry_stats = pd.DataFrame()
+    concept_stats = pd.DataFrame()
+    board_panel_frame = pd.DataFrame()
+    if board_requests:
+        try:
+            board_panel = client.get_kline_panel(board_requests, signal_date, lmt=130, force=False)
+            board_panel_frame = board_panel.frame.copy()
+            industry_stats = compute_industry_stats(board_panel.frame, boards.industry, signal_ts)
+            concept_stats = compute_concept_stats(board_panel.frame, boards.concept, signal_ts)
+            if board_panel.failed:
+                warnings.append(f"{len(board_panel.failed)} 个行业/概念板块指数缺失，相关热度按中性处理")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"行业/概念指数 K 线不可用，相对强弱按中性处理：{exc}")
+    else:
+        warnings.append("板块映射覆盖不足，行业/概念相对强弱按中性处理")
+
+    _report(progress, "主题", 0.84, "匹配政策主题与概念热度")
+    try:
+        features = attach_theme_features(features, snapshot, mapper, industry_stats, concept_stats, macro)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"主题特征附加失败，按中性主题处理：{exc}")
+        features["theme_fit"] = 0.0
+        features["theme_tilt"] = 0.0
+        features["theme_names"] = [() for _ in range(len(features))]
+        features["theme_id"] = ""
+        features["theme_proxy_ret20"] = 0.0
+        features["ind_ret20"] = 0.0
+        features["ind_ret60"] = 0.0
+        features["ind_vol20"] = np.nan
+        features["ind_breadth"] = 0.5
+        features["ind_day"] = 0.0
+        features["rs20"] = 0.0
+        features["rs60"] = 0.0
+        features["concept_day"] = 0.0
+        features["concept_20d"] = 0.0
+        features["concept_60d"] = 0.0
+        features["concept_breadth"] = 0.5
+        features["concept_leader_pct"] = 0.0
+        features["concept_count"] = 0.0
+
+    _report(progress, "评分", 0.90, "运行潜在投机与活跃投机双模型")
+    potential = score_model(features, snapshot, model_cfg, "potential", settings, macro, signal_ts)
+    active = score_model(features, snapshot, model_cfg, "active", settings, macro, signal_ts)
+    if potential.empty:
+        warnings.append("潜在投机模型没有符合条件的股票：可放宽板块/市值筛选或增大扫描深度")
+    if active.empty:
+        warnings.append("活跃投机模型没有符合条件的股票：可放宽板块/市值筛选或增大扫描深度")
+    if len(potential) < min(settings.n_potential * 2, 20):
+        warnings.append(f"潜在榜合格样本仅 {len(potential)} 只，排名稳定性有限")
+    if len(active) < min(settings.n_active * 2, 20):
+        warnings.append(f"活跃榜合格样本仅 {len(active)} 只，排名稳定性有限")
+
+    elapsed = time.time() - started
+    meta = {
+        "signal_date": signal_date.strftime("%Y-%m-%d"),
+        "snapshot_time": snap_bundle.fetched_at.astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M"),
+        "generated_at": china_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "elapsed_sec": round(elapsed, 1),
+        "universe_total": int(len(snapshot)),
+        "eligible_base": int(pre_stats.get("base", 0)),
+        "preselected": int(len(valid_codes)),
+        "features": int(len(features)),
+        "potential_scored": int(len(potential)),
+        "active_scored": int(len(active)),
+        "warnings": list(dict.fromkeys(warnings)),
+        "stale": bool(snap_bundle.stale or kline_bundle.stale or boards.stale),
+        "model_version": str(model_cfg.get("version", "")),
+        "config_fingerprint": _fingerprint(settings, model_cfg),
+        "macro_label": str(macro.get("label", "")),
+        "risk_appetite": round(float(macro.get("risk_appetite", 50)), 1),
+        "kline_rows": int(len(panel)),
+        "kline_missing": int(len(kline_bundle.failed)),
+        "kline_fallback": int(len(kline_bundle.fallback)),
+        "source": (
+            "内置离线数据（灾备）" if any("内置离线" in w for w in warnings)
+            else "东方财富公开行情 + 腾讯/新浪备用 K 线"
+        ),
+        "cache_dir": str(client.cache.directory),
+    }
+    _report(progress, "完成", 1.0, f"潜在 {len(potential)} 只 / 活跃 {len(active)} 只")
+    return {
+        "potential": potential,
+        "active": active,
+        "kline": panel,
+        "board_panel": board_panel_frame,
+        "macro": macro,
+        "meta": meta,
+        "industry_stats": industry_stats,
+    }

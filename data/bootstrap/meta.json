@@ -1,0 +1,12 @@
+{
+  "built_at": "2026-10-19 12:30:01",
+  "signal_date": "2026-10-16",
+  "snapshot_time": "2026-10-19 11:27",
+  "snapshot_stale": true,
+  "universe": 5562,
+  "scanned_codes": 840,
+  "kline_rows": 266578,
+  "depth": 420,
+  "source": "东方财富公开行情 / 腾讯、新浪备用",
+  "note": "仅供接口故障时预览，不是实时行情；请以程序实际抓取与数据基准日为准。"
+}

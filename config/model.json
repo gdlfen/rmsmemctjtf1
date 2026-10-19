@@ -1,0 +1,62 @@
+{
+  "version": "2026.10-r1",
+  "disclaimer": "本模型只做相对排序与研究辅助，不预测个股必然上涨，不构成任何投资建议。",
+  "potential": {
+    "label": "最有潜在投机价值",
+    "definition": "尚未被市场充分交易、处于蓄势或低位，但具备政策/产业催化、筹码沉淀与资金潜伏特征的股票。",
+    "weights": {
+      "policy": 0.20,
+      "compression": 0.18,
+      "accumulation": 0.17,
+      "base": 0.12,
+      "fundamental": 0.11,
+      "neglect": 0.10,
+      "elasticity": 0.07,
+      "regime": 0.05
+    },
+    "eligibility": {
+      "min_list_days": 400,
+      "min_bars": 170,
+      "min_price": 2.0,
+      "min_float_mcap_yi": 12.0,
+      "max_float_mcap_yi": 900.0,
+      "min_amount20_yi": 0.45,
+      "max_ret60": 0.60,
+      "max_ret20": 0.32,
+      "max_turnover20": 0.14,
+      "max_limit_up20": 2
+    }
+  },
+  "active": {
+    "label": "最有投机价值",
+    "definition": "已经被资金选中、处于题材/趋势/量能共振阶段，具备短线博弈与接力价值的股票。",
+    "weights": {
+      "momentum": 0.20,
+      "theme": 0.20,
+      "volume": 0.16,
+      "breakout": 0.14,
+      "flow": 0.10,
+      "elasticity": 0.08,
+      "fundamental": 0.07,
+      "regime": 0.05
+    },
+    "eligibility": {
+      "min_list_days": 150,
+      "min_bars": 90,
+      "min_price": 2.0,
+      "min_float_mcap_yi": 15.0,
+      "max_float_mcap_yi": 3000.0,
+      "min_amount20_yi": 1.0,
+      "min_ret20": 0.0,
+      "min_turnover20": 0.015,
+      "require_above_ma20": true
+    }
+  },
+  "scan": {
+    "preselect_potential": 420,
+    "preselect_active": 420,
+    "lookback_bars": 320,
+    "max_workers": 20,
+    "cache_ttl_minutes": 30
+  }
+}

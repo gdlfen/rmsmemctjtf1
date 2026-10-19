@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+
+# 环境
+.venv/
+venv/
+env/
+.tmp/
+
+# 本地缓存与报告
+data/cache/*
+!data/cache/.gitkeep
+reports/*
+!reports/.gitkeep
+*.log
+
+# Streamlit 机密
+.streamlit/secrets.toml
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
