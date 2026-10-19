@@ -80,7 +80,9 @@ SPEC_RADAR_OFFLINE=1 streamlit run app.py
 4. Python version 选 3.12；
 5. Deploy。部署完成后用手机打开生成的 `https://<app>.streamlit.app`。
 
-Streamlit Cloud 首次启动会执行 `pip install -r requirements.txt`。如果云端访问中国行情接口不稳定，程序会自动降级到内置灾备包并提示；也可以先在本地运行一次 `python scripts/build_bootstrap.py`，提交更新后的 `data/bootstrap/` 再部署。
+Streamlit Cloud 首次启动会执行 `pip install -r requirements.txt`。**注意：Streamlit 只读取仓库根目录的 `requirements.txt`。** 如果你把整个 `ashare-spec-radar/` 文件夹放进一个更大的 GitHub 仓库，请要么把本目录内容移到仓库根目录、Main file 填 `app.py`；要么保留子目录，但在仓库根目录再放一份 `requirements.txt`，Main file 填 `ashare-spec-radar/app.py`。当前图表使用 Streamlit 自带依赖 Altair，不再强依赖 Plotly；但根目录依赖文件仍是部署规范。
+
+如果云端访问中国行情接口不稳定，程序会自动降级到内置灾备包并提示；也可以先在本地运行一次 `python scripts/build_bootstrap.py`，提交更新后的 `data/bootstrap/` 再部署。
 
 **不需要 API Key，不需要数据库。** 数据来自公开行情接口。
 

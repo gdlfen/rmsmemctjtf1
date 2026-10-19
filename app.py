@@ -14,11 +14,10 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import altair as alt
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
-from plotly.subplots import make_subplots
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
@@ -268,77 +267,73 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
     return out.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
 
-def plot_price(row: pd.Series, kline: pd.DataFrame) -> go.Figure:
+def plot_price(row: pd.Series, kline: pd.DataFrame) -> alt.VConcatChart:
+    """Altair K 线 + MA20/60 + 成交量，避免依赖 plotly。"""
     code = str(row["code"])
     data = kline[kline["code"].astype(str) == code].copy()
     data["date"] = pd.to_datetime(data["date"])
-    data = data.sort_values("date").tail(180)
+    data = data.sort_values("date").tail(170)
     data["ma20"] = data["close"].rolling(20).mean()
     data["ma60"] = data["close"].rolling(60).mean()
-    fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.04,
-        row_heights=[0.76, 0.24], subplot_titles=("", ""),
+    data["涨跌"] = np.where(data["close"] >= data["open"], "涨", "跌")
+    tooltip = [
+        alt.Tooltip("date:T", title="日期", format="%Y-%m-%d"),
+        alt.Tooltip("open:Q", title="开", format=".2f"),
+        alt.Tooltip("high:Q", title="高", format=".2f"),
+        alt.Tooltip("low:Q", title="低", format=".2f"),
+        alt.Tooltip("close:Q", title="收", format=".2f"),
+        alt.Tooltip("volume:Q", title="量", format=",.0f"),
+    ]
+    base = alt.Chart(data).encode(x=alt.X("date:T", title=None, axis=alt.Axis(format="%Y-%m", labelAngle=0)))
+    wick = base.mark_rule(strokeWidth=1.0).encode(
+        y=alt.Y("low:Q", title="价格", scale=alt.Scale(zero=False)),
+        y2="high:Q",
+        color=alt.condition(alt.datum.close >= alt.datum.open, alt.value("#d9480f"), alt.value("#2b8a3e")),
+        tooltip=tooltip,
     )
-    fig.add_trace(
-        go.Candlestick(
-            x=data["date"], open=data["open"], high=data["high"], low=data["low"], close=data["close"],
-            increasing_line_color="#d9480f", increasing_fillcolor="#f97316",
-            decreasing_line_color="#2b8a3e", decreasing_fillcolor="#4ade80",
-            name="K线",
-        ),
-        row=1, col=1,
+    body = base.mark_bar(size=4, opacity=0.95).encode(
+        y="open:Q", y2="close:Q",
+        color=alt.condition(alt.datum.close >= alt.datum.open, alt.value("#f97316"), alt.value("#4ade80")),
+        tooltip=tooltip,
     )
-    fig.add_trace(
-        go.Scatter(x=data["date"], y=data["ma20"], name="MA20", line=dict(color="#f59e0b", width=1.4)),
-        row=1, col=1,
+    ma20 = base.mark_line(color="#f59e0b", strokeWidth=1.4).encode(y=alt.Y("ma20:Q", title=None))
+    ma60 = base.mark_line(color="#2563eb", strokeWidth=1.4).encode(y=alt.Y("ma60:Q", title=None))
+    price = alt.layer(wick, body, ma20, ma60).properties(height=290)
+    volume = alt.Chart(data).mark_bar(opacity=0.65).encode(
+        x=alt.X("date:T", title=None),
+        y=alt.Y("volume:Q", title="成交量"),
+        color=alt.condition(alt.datum.close >= alt.datum.open, alt.value("#f97316"), alt.value("#4ade80")),
+        tooltip=tooltip,
+    ).properties(height=80)
+    return (
+        alt.vconcat(price, volume, spacing=6)
+        .resolve_scale(x="shared")
+        .configure_view(stroke=None)
+        .configure_axis(gridColor="#eef0f3", domain=False, labelColor="#6b7280", titleColor="#6b7280")
     )
-    fig.add_trace(
-        go.Scatter(x=data["date"], y=data["ma60"], name="MA60", line=dict(color="#2563eb", width=1.4)),
-        row=1, col=1,
-    )
-    colors = np.where(data["close"] >= data["open"], "#f97316", "#4ade80")
-    fig.add_trace(
-        go.Bar(x=data["date"], y=data["volume"], marker_color=colors, name="成交量", opacity=0.75),
-        row=2, col=1,
-    )
-    fig.update_layout(
-        height=450, margin=dict(l=8, r=8, t=16, b=8),
-        xaxis_rangeslider_visible=False, hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(size=11),
-    )
-    fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(gridcolor="#eef0f3", zeroline=False)
-    return fig
 
 
-def plot_radar(row: pd.Series, model_key: str) -> go.Figure:
+def plot_radar(row: pd.Series, model_key: str) -> alt.Chart:
+    """用横向分项条形图替代雷达图，手机端更易读。"""
     order = {
         "potential": ["policy", "compression", "accumulation", "base", "fundamental", "neglect", "elasticity", "regime"],
         "active": ["momentum", "theme", "volume", "breakout", "flow", "elasticity", "fundamental", "regime"],
     }[model_key]
-    labels, values = [], []
+    rows = []
     for key in order:
         col = f"c_{key}"
         if col in row.index and pd.notna(row[col]):
-            labels.append(COMPONENT_LABELS.get(key, key))
-            values.append(float(row[col]))
-    if not labels:
-        return go.Figure()
-    labels.append(labels[0])
-    values.append(values[0])
-    fig = go.Figure(go.Scatterpolar(
-        r=values, theta=labels, fill="toself",
-        line_color=score_color(model_key), fillcolor="rgba(249,115,22,.18)",
-    ))
-    fig.update_layout(
-        height=360, margin=dict(l=35, r=35, t=35, b=20),
-        polar=dict(radialaxis=dict(visible=True, range=[0, 100], tickfont=dict(size=9), gridcolor="#e5e7eb"),
-                   angularaxis=dict(tickfont=dict(size=10))),
-        showlegend=False, paper_bgcolor="rgba(0,0,0,0)", font=dict(size=10),
-    )
-    return fig
+            rows.append({"分项": COMPONENT_LABELS.get(key, key), "得分": float(row[col])})
+    if not rows:
+        return alt.Chart(pd.DataFrame({"分项": [], "得分": []})).mark_bar()
+    df = pd.DataFrame(rows)
+    chart = alt.Chart(df).mark_bar(cornerRadius=4, color=score_color(model_key)).encode(
+        x=alt.X("得分:Q", title=None, scale=alt.Scale(domain=[0, 100])),
+        y=alt.Y("分项:N", title=None, sort=list(df["分项"])),
+        tooltip=[alt.Tooltip("分项:N", title="分项"), alt.Tooltip("得分:Q", title="得分", format=".1f")],
+    ).properties(height=285)
+    text = chart.mark_text(align="left", dx=4, color="#4b5563", fontSize=10).encode(text=alt.Text("得分:Q", format=".0f"))
+    return (chart + text).configure_view(stroke=None).configure_axis(grid=False, domain=False, labelColor="#374151", titleColor="#6b7280")
 
 
 def reason_text(row: pd.Series, model_key: str) -> list[str]:
@@ -420,10 +415,10 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
     c1, c2 = st.columns([1, 1.45], gap="medium")
     with c1:
         st.markdown("#### 分项画像")
-        st.plotly_chart(plot_radar(row, model_key), width="stretch", config={"displayModeBar": False})
+        st.altair_chart(plot_radar(row, model_key), width="stretch")
     with c2:
         st.markdown("#### 价格与均线")
-        st.plotly_chart(plot_price(row, kline), width="stretch", config={"displayModeBar": False})
+        st.altair_chart(plot_price(row, kline), width="stretch")
     st.markdown("#### 模型解释")
     for line in reason_text(row, model_key):
         st.markdown(f"<div class='reason'>{line}</div>", unsafe_allow_html=True)

@@ -2,6 +2,13 @@
 
 目标：得到一个可以在手机浏览器打开的固定 URL，同时保留本地运行能力。
 
+> **重要：依赖文件必须在仓库根目录。** Streamlit Community Cloud 只读取仓库根目录的 `requirements.txt`。如果你把项目放在 `ashare-spec-radar/` 子目录中，当前报错 `ModuleNotFoundError: plotly` 的原因就是根目录没有依赖文件。两种修复方式：
+>
+> 1. **推荐**：把 `ashare-spec-radar/` 里的内容直接作为仓库根目录（`app.py`、`requirements.txt` 与 `.git` 同级），Main file 填 `app.py`；
+> 2. 保留子目录：在仓库根目录新增 `requirements.txt`（内容与子目录中的一致），Main file 填 `ashare-spec-radar/app.py`。
+>
+> 修改后到 Streamlit Cloud 右上角 **Manage app → Reboot app**，不要只刷新浏览器。
+
 ---
 
 ## 1. 准备 GitHub 仓库
@@ -58,7 +65,7 @@ https://<app-name>.streamlit.app
 ## 3. 手机使用建议
 
 - 首屏“总览”看两个榜单 Top 3；点“潜在投机榜 / 活跃投机榜”看完整表格；
-- 表格可横向滑动；点“个股详情”查看雷达、价格/均线、风险标签；
+- 表格可横向滑动；点“个股详情”查看分项条形图、价格/均线、风险标签；
 - 页面顶部必须核对 **信号基准日** 与 **快照时间**；
 - 出现“使用缓存/内置离线数据”时，说明实时接口异常，不要把它当作盘中实时信号；
 - 侧栏“刷新行情（清空缓存）”会清空服务端缓存并重新抓取；
@@ -120,7 +127,8 @@ python scripts/scan.py --n 12 --depth 300
 
 | 现象 | 处理 |
 |---|---|
-| `ModuleNotFoundError: plotly` | 确认 `requirements.txt` 已提交，且没有把 `plotly` 写进 `requirements-dev.txt` 之外 |
+| `ModuleNotFoundError: plotly` | 这是旧版本/旧部署的报错。当前代码已改用 Streamlit 自带依赖 Altair；拉取最新提交并 **Reboot app**。根目录缺少 `requirements.txt` 仍会导致其他依赖装不上，见本文开头的修复方式 |
+| `ModuleNotFoundError: altair` | 极简环境缺少 Altair。确认仓库根目录 `requirements.txt` 包含 `altair>=5,<7`，然后 Reboot app |
 | 页面空白/一直转圈 | 查看 Cloud 日志；可能是首次抓行情较慢，或接口被限流 |
 | 提示 `data/bootstrap` 缺失 | 本地执行 `python scripts/build_bootstrap.py` 并提交 `data/bootstrap/` |
 | 时区/信号日不对 | 程序按 Asia/Shanghai 判断 15:10 收盘确认；云端 UTC 不影响 |
