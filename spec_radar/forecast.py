@@ -207,6 +207,20 @@ def train_forecast(step: int = 10) -> Dict[str, Any]:
         X_all_s, _, mean_all, std_all = _standardize(X_all, X_all)
         coef_hit_all, intercept_hit_all = _fit_logistic(X_all_s, d["target_hit"].to_numpy())
         coef_up_all, intercept_up_all = _fit_logistic(X_all_s, d["positive"].to_numpy())
+        # 离散时间累计风险模型：3/5/10/20 日内“首次突破/涨停”的概率。
+        launch_models = {}
+        for horizon in (3, 5, 10, 20):
+            y_launch = (d["fwd_launch_days"].fillna(21) <= horizon).astype(float)
+            if y_launch.nunique() < 2:
+                continue
+            coef_l, intercept_l = _fit_logistic(X_all_s, y_launch.to_numpy())
+            p_l_test = _sigmoid(intercept_l + X_test_s @ coef_l) if len(test) else np.array([])
+            launch_models[str(horizon)] = {
+                "coef": coef_l.tolist(),
+                "intercept": intercept_l,
+                "base_rate": float(y_launch.mean()),
+                "auc": _auc((test["fwd_launch_days"].fillna(21) <= horizon).to_numpy(), p_l_test) if len(test) else None,
+            }
         terciles = np.quantile(d["tech_score"], [1 / 3, 2 / 3])
         buckets = {}
         for label, lo, hi in (("low", -np.inf, terciles[0]), ("mid", terciles[0], terciles[1]), ("high", terciles[1], np.inf)):
@@ -248,6 +262,7 @@ def train_forecast(step: int = 10) -> Dict[str, Any]:
             "intercept_hit": intercept_hit_all,
             "coef_up": coef_up_all.tolist(),
             "intercept_up": intercept_up_all,
+            "launch_models": launch_models,
             "terciles": terciles.tolist(),
             "buckets": buckets,
         }
@@ -323,6 +338,7 @@ def predict_forecasts(df: pd.DataFrame, model_key: str, params: Optional[Dict[st
         buckets = {}
 
     labels, low, base, bull, expected_days, window_probs = [], [], [], [], [], []
+    launch_models = model.get("launch_models", {}) or {}
     for i, (_, row) in enumerate(out.iterrows()):
         bucket = _bucket_for(float(tech.iloc[i]), terciles)
         b = buckets.get(bucket) or buckets.get("mid") or {}
@@ -342,14 +358,46 @@ def predict_forecasts(df: pd.DataFrame, model_key: str, params: Optional[Dict[st
         low.append(close * (1 + up_low))
         base.append(close * (1 + target_mid))
         bull.append(close * (1 + target_bull))
-        probs = b.get("launch_probs") or {"1-3": 0.18, "4-10": 0.32, "11-20": 0.20, "20+": 0.30}
-        label = max(probs.items(), key=lambda kv: kv[1])[0] if probs else "10-20"
+        if launch_models:
+            cumulative = {}
+            for horizon in (3, 5, 10, 20):
+                lm = launch_models.get(str(horizon))
+                if not lm:
+                    continue
+                cumulative[horizon] = float(_sigmoid(lm["intercept"] + Xs[i] @ np.array(lm["coef"], dtype=float)))
+            if 3 in cumulative and 5 in cumulative:
+                p3 = cumulative[3]
+                p5 = max(p3, cumulative.get(5, p3))
+                p10 = max(p5, cumulative.get(10, p5))
+                p20 = max(p10, cumulative.get(20, p10))
+                p3 = float(np.clip(p3, 0.01, 0.95))
+                p5 = float(np.clip(p5, p3, 0.97))
+                p10 = float(np.clip(p10, p5, 0.98))
+                p20 = float(np.clip(p20, p10, 0.99))
+                probs = {
+                    "1-3": p3,
+                    "4-10": max(0.0, p10 - p3),
+                    "11-20": max(0.0, p20 - p10),
+                    "20+": max(0.0, 1.0 - p20),
+                }
+                expected = (
+                    2.0 * p3 + 7.0 * max(0.0, p10 - p3) + 15.0 * max(0.0, p20 - p10)
+                    + 26.0 * max(0.0, 1.0 - p20)
+                )
+            else:
+                probs = b.get("launch_probs") or {"1-3": 0.18, "4-10": 0.32, "11-20": 0.20, "20+": 0.30}
+                expected = float(b.get("launch_median", 12))
+        else:
+            probs = b.get("launch_probs") or {"1-3": 0.18, "4-10": 0.32, "11-20": 0.20, "20+": 0.30}
+            expected = float(b.get("launch_median", 12))
+        label = max(probs.items(), key=lambda kv: kv[1])[0] if probs else "11-20"
         labels.append(label)
         window_probs.append(
             f"1-3日 {probs.get('1-3', 0):.0%} / 4-10日 {probs.get('4-10', 0):.0%} / "
-            f"11-20日 {probs.get('11-20', 0):.0%} / 20日+ {probs.get('20+', 0):.0%}"
+            f"11-20日 {probs.get('11-20', 0):.0%} / 20日+ {probs.get('20+', 0):.0%}；"
+            f"概率加权约第 {expected:.0f} 个交易日"
         )
-        expected_days.append(float(b.get("launch_median", 12)))
+        expected_days.append(float(expected))
     out["p_hit_10d"] = np.clip(p_hit, 0.02, 0.95)
     out["p_up_10d"] = np.clip(p_up, 0.05, 0.95)
     out["forecast_threshold"] = threshold

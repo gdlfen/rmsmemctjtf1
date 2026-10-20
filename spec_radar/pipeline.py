@@ -39,8 +39,14 @@ from .datasource import (
     determine_signal_date,
 )
 from .forecast import load_params as load_forecast_params, predict_forecasts
-from .framework import add_active_framework, add_potential_framework, build_daily_screens
-from .learning import apply_calibration, load_calibration
+from .framework import add_active_framework, add_potential_framework, add_trade_levels, build_daily_screens
+from .learning import (
+    apply_calibration,
+    calibrate as calibrate_learning,
+    evaluate_ledger,
+    load_calibration,
+    record_predictions,
+)
 from .indicators import compute_feature_frame
 from .macro import build_macro_context
 from .scoring import (
@@ -141,6 +147,7 @@ def run_scan(
     try:
         context_bundle = client.get_market_context_panel(signal_date, lmt=320)
         context_panel = context_bundle.frame
+        warnings.extend(context_bundle.warnings or [])
         if context_bundle.failed:
             warnings.append(f"市场环境面板缺失 {len(context_bundle.failed)} 个代理资产，按中性处理")
     except Exception as exc:  # noqa: BLE001
@@ -304,6 +311,20 @@ def run_scan(
     else:
         warnings.append("离线模式：跳过公告红线核查")
 
+    # 自我学习：先用本次历史面板结算旧账本，再校准本批预测。
+    # 关闭方式：SPEC_RADAR_AUTO_LEARNING=0。
+    auto_learning = str(os.environ.get("SPEC_RADAR_AUTO_LEARNING", "1")).strip().lower() not in {"0", "false", "no", "off"}
+    learning_eval = {"evaluated": 0, "pending": 0}
+    learning_cal = load_calibration()
+    if auto_learning:
+        try:
+            learning_eval = evaluate_ledger(panel)
+            if learning_eval.get("evaluated", 0) > 0:
+                learning_cal = calibrate_learning()
+                warnings.append(f"自我学习：结算 {learning_eval['evaluated']} 条历史预测并更新概率/分数校准")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"自我学习评估失败（不影响选股）：{exc}")
+
     _report(progress, "框架/预测", 0.96, "六维检查、概率、目标价与起爆窗口")
     filtered = {"potential": 0, "active": 0}
     if not potential.empty:
@@ -332,14 +353,38 @@ def run_scan(
         potential = predict_forecasts(potential, "potential", forecast_params)
     if not active.empty:
         active = predict_forecasts(active, "active", forecast_params)
-    learning_cal = load_calibration()
     if not potential.empty:
         potential = apply_calibration(potential, "potential", learning_cal)
     if not active.empty:
         active = apply_calibration(active, "active", learning_cal)
+    if not potential.empty:
+        potential = add_trade_levels(potential, "potential")
+    if not active.empty:
+        active = add_trade_levels(active, "active")
     screens = build_daily_screens(features, snapshot, {"potential": potential, "active": active})
 
     elapsed = time.time() - started
+    # 把离线/缓存降级合并成一条，不要把相同提示重复五遍。
+    detail_warnings = list(dict.fromkeys(warnings))
+    offline_like = [w for w in detail_warnings if any(x in w for x in ("离线模式", "离线数据", "内置离线", "旧缓存", "不是实时行情"))]
+    if offline_like:
+        detail_warnings = [w for w in detail_warnings if w not in offline_like]
+        detail_warnings.append(
+            "数据源为内置离线灾备/旧缓存：不是实时行情；信号日、快照时间与来源见页面顶部。"
+        )
+    index_missing = [w.replace("指数缺失：", "") for w in detail_warnings if "指数缺失" in w]
+    board_missing = [w for w in detail_warnings if "板块" in w and ("不可用" in w or "缺失" in w)]
+    offline_mode = bool(offline_like)
+    data_health = {
+        "mode": "offline_bootstrap" if offline_mode else ("cache" if snap_bundle.stale or kline_bundle.stale else "live"),
+        "offline": offline_mode,
+        "board_ok": bool(boards is not None and not boards.industry.empty and not boards.concept.empty and not industry_stats.empty),
+        "index_missing": index_missing,
+        "board_missing": board_missing,
+        "limitup_ok": bool(limit_bundle.qdate == signal_date and not limit_bundle.pool.empty),
+        "ann_checked": int(ann_checked),
+        "stale": bool(snap_bundle.stale or kline_bundle.stale or boards.stale),
+    }
     meta = {
         "signal_date": signal_date.strftime("%Y-%m-%d"),
         "snapshot_time": snap_bundle.fetched_at.astimezone(CN_TZ).strftime("%Y-%m-%d %H:%M"),
@@ -351,7 +396,9 @@ def run_scan(
         "features": int(len(features)),
         "potential_scored": int(len(potential)),
         "active_scored": int(len(active)),
-        "warnings": list(dict.fromkeys(warnings)),
+        "warnings": detail_warnings,
+        "warnings_detail": list(dict.fromkeys(warnings)),
+        "data_health": data_health,
         "stale": bool(snap_bundle.stale or kline_bundle.stale or boards.stale),
         "model_version": str(model_cfg.get("version", "")),
         "config_fingerprint": _fingerprint(settings, model_cfg),
@@ -373,7 +420,22 @@ def run_scan(
         "forecast_auc_potential": (forecast_params.get("models") or {}).get("potential", {}).get("auc_hit"),
         "forecast_auc_active": (forecast_params.get("models") or {}).get("active", {}).get("auc_hit"),
         "learning_calibrated": bool((learning_cal.get("models") or {}).get("potential", {}).get("ok")),
+        "learning_evaluated": int(learning_eval.get("evaluated", 0)),
+        "learning_pending": int(learning_eval.get("pending", 0)),
     }
+    if auto_learning:
+        try:
+            n_learn = min(20, max(5, int(settings.n_potential)))
+            recorded = record_predictions(
+                {"meta": meta, "potential": potential, "active": active},
+                n_learn, n_learn,
+            )
+            meta["learning_recorded"] = int(recorded)
+        except Exception as exc:  # noqa: BLE001
+            meta["learning_recorded"] = 0
+            warnings.append(f"学习账本记录失败（不影响选股）：{exc}")
+    else:
+        meta["learning_recorded"] = 0
     _report(progress, "完成", 1.0, f"潜在 {len(potential)} 只 / 活跃 {len(active)} 只")
     return {
         "potential": potential,

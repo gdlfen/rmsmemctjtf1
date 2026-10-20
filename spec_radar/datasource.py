@@ -662,6 +662,20 @@ class MarketClient:
             for fut in as_completed(futures):
                 fut.result()
 
+        bootstrap_notes: List[str] = []
+        if failed:
+            # 实时源有缺口时，用内置灾备补单只/单指数，避免一条缺失就报“指数缺失”。
+            fill_req = {secid: requests_.get(secid, "") for secid in failed}
+            fill = self._bootstrap_kline(fill_req, end_date, lmt)
+            if fill is not None and not fill.frame.empty:
+                fill_frame = fill.frame.copy()
+                fill_frame = fill_frame[fill_frame["secid"].astype(str).isin(set(failed))] if "secid" in fill_frame else fill_frame
+                if not fill_frame.empty:
+                    frames.append(fill_frame)
+                    filled = set(fill_frame["secid"].astype(str))
+                    failed = [s for s in failed if s not in filled]
+                    bootstrap_notes.append(f"{len(filled)} 个资产用内置离线包补齐")
+
         if not frames:
             stale = self.cache.get(key, max_age_sec=None)
             if allow_stale and stale is not None and isinstance(stale.value, pd.DataFrame):
@@ -687,11 +701,13 @@ class MarketClient:
                 return boot
             raise DataError(f"K 线缺失过多：失败 {len(failed)} / {len(secids)}")
         panel = pd.concat(frames, ignore_index=True)
+        panel = panel.drop_duplicates(["code", "date"], keep="last")
         panel = panel.sort_values(["code", "date"]).reset_index(drop=True)
-        # 有失败时也缓存可用部分，但缩短 TTL，下次刷新会补抓。
+        # 有失败时也缓存可用部分，下次刷新会补抓。
         self.cache.set(key, panel, {"failed": len(failed), "rows": int(len(panel)), "fallback": len(fallback)})
         return KlineBundle(
             frame=panel, fetched_at=china_now(), failed=failed, fallback=fallback,
+            warnings=bootstrap_notes,
         )
 
     def _bootstrap_kline(

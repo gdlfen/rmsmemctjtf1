@@ -175,6 +175,21 @@ def calibrate() -> Dict[str, Any]:
         valid = np.isfinite(predicted_upside) & (predicted_upside > 0.005)
         target_factor = float(np.clip(np.nanmedian(realized_upside[valid]) / np.nanmedian(predicted_upside[valid]), 0.7, 1.3)) if valid.sum() >= 10 else 1.0
         brier = float(np.mean((p - hit) ** 2)) if n else None
+        # 分数分层校准：只有样本足够时，才对“高分组/低分组”做小幅修正，防止过拟合。
+        score_adjustments = {}
+        score_terciles = None
+        if n >= 30:
+            scores = np.array([float(x.get("score", np.nan)) for x in rows])
+            valid_score = np.isfinite(scores)
+            if valid_score.sum() >= 30:
+                q1, q2 = np.quantile(scores[valid_score], [1 / 3, 2 / 3])
+                score_terciles = [float(q1), float(q2)]
+                overall = float(hit.mean())
+                for label, lo, hi in (("low", -np.inf, q1), ("mid", q1, q2), ("high", q2, np.inf)):
+                    mask = valid_score & (scores >= lo) & (scores < hi)
+                    if mask.sum() >= 8:
+                        bucket_hit = float(hit[mask].mean())
+                        score_adjustments[label] = float(np.clip((bucket_hit - overall) * 6.0, -2.5, 2.5))
         out["models"][model] = {
             "ok": n >= 20,
             "n": n,
@@ -184,7 +199,9 @@ def calibrate() -> Dict[str, Any]:
             "probability_factor": factor if n >= 20 else 1.0,
             "target_factor": target_factor if n >= 20 else 1.0,
             "avg_mfe": float(np.nanmean(mfe)),
-            "note": "样本不足，暂不应用校准" if n < 20 else "概率/目标价已按已结算样本校准",
+            "score_terciles": score_terciles,
+            "score_adjustments": score_adjustments,
+            "note": "样本不足，暂不应用校准" if n < 20 else "概率/目标价/分数分层已按已结算样本校准",
         }
     _write_json(CALIBRATION_PATH, out)
     return out
@@ -206,6 +223,20 @@ def apply_calibration(df: pd.DataFrame, model_key: str, calibration: Optional[Di
     for col in ("target_high_low", "target_high", "target_high_bull"):
         out[col] = (out[col] * target_factor).round(2)
     out["target_upside_pct"] = out["target_high"] / out["close_signal"] - 1.0
+    terciles = m.get("score_terciles")
+    adjustments = m.get("score_adjustments") or {}
+    if terciles and adjustments:
+        def bucket(score: float) -> str:
+            if score < float(terciles[0]):
+                return "low"
+            if score < float(terciles[1]):
+                return "mid"
+            return "high"
+        out["learning_score_adj"] = out["score"].map(lambda s: float(adjustments.get(bucket(float(s)), 0.0)))
+        out["score"] = (out["score"] + out["learning_score_adj"]).clip(0, 100)
+        out = out.sort_values(["score", "confidence", "amount20_yi"], ascending=[False, False, False]).reset_index(drop=True)
+        if "rank" in out:
+            out["rank"] = np.arange(1, len(out) + 1)
     out["learning_status"] = f"已校准 n={int(m.get('n', 0))}"
     return out
 

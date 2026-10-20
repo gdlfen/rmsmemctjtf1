@@ -156,6 +156,81 @@ def add_active_framework(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def add_trade_levels(df: pd.DataFrame, model_key: str) -> pd.DataFrame:
+    """给出条件式计划买点/卖点，不是“必然成交价”。
+
+    - 潜在：等待回踩支撑或放量突破，买点通常在当前价下方；
+    - 活跃：等待回踩 MA10 或前高确认，避免在加速段追高；
+    - 卖点：第一目标为预测目标高价下沿/前高，第二目标为上沿；
+    - 止损：MA20/MA60/近期低点与固定百分比的较保守者。
+    """
+    if df.empty:
+        return df
+    out = df.copy()
+    rows = []
+    for _, row in out.iterrows():
+        close = _s(row, "close_signal", np.nan)
+        if not np.isfinite(close) or close <= 0:
+            rows.append({})
+            continue
+        atr = _s(row, "atr14", 0.03) * close
+        ma5 = _s(row, "ma5", close)
+        ma10 = _s(row, "ma10", close)
+        ma20 = _s(row, "ma20", close)
+        ma60 = _s(row, "ma60", close)
+        dist_low60 = _s(row, "dist_low60", np.nan)
+        low60 = close / (1 + dist_low60) if np.isfinite(dist_low60) and dist_low60 > -1 else close * 0.9
+        dist_high60 = _s(row, "dist_high60", np.nan)
+        high60 = close / (1 + dist_high60) if np.isfinite(dist_high60) and dist_high60 > -1 else close * 1.1
+        t_low = _s(row, "target_high_low", close * 1.05)
+        t_mid = _s(row, "target_high", close * 1.08)
+        t_bull = _s(row, "target_high_bull", close * 1.15)
+        if model_key == "potential":
+            buy_low = max(low60, ma20 * 0.965, ma60 * 0.96)
+            buy_high = min(close * 1.015, ma20 * 1.035)
+            if buy_high <= buy_low:
+                buy_high = buy_low * 1.02
+            best_buy = (buy_low + buy_high) / 2
+            stop = min(buy_low * 0.97, ma60 * 0.985) if np.isfinite(ma60) else buy_low * 0.97
+            trigger = "回踩 MA20/60 或 60 日低点缩量企稳；或放量突破 20 日高点后回踩确认"
+            sell_low = max(t_low, high60 * 0.98, best_buy * 1.06)
+            sell_high = max(t_bull, t_mid, sell_low * 1.02)
+            note = "潜在票先等回踩/突破确认，不在放量长上影当天追；破位不补仓。"
+        else:
+            buy_low = min(ma10, close * 0.985) * 0.995 if np.isfinite(ma10) else close * 0.96
+            buy_high = max(ma10 * 1.01, buy_low * 1.015) if np.isfinite(ma10) else close * 0.99
+            if buy_high >= close:
+                buy_high = close * 0.995
+            if buy_high <= buy_low:
+                buy_high = buy_low * 1.01
+            best_buy = (buy_low + buy_high) / 2
+            stop = min(ma20 * 0.97, buy_low * 0.94, close * 0.92) if np.isfinite(ma20) else buy_low * 0.94
+            trigger = "回踩 MA10 不破且缩量，或突破前高后 1–2 日不破；不追 5 日加速末端"
+            sell_low = max(t_low, high60 * 0.99, best_buy * 1.06)
+            sell_high = max(t_bull, t_mid, sell_low * 1.02)
+            note = "活跃票按接力/波段处理，跌破 MA20 或放量长阴先离场。"
+        stop = min(stop, best_buy * 0.99) if stop < best_buy else best_buy * 0.92
+        risk = max(best_buy - stop, close * 0.01)
+        reward = max(sell_low - best_buy, 0)
+        rr = reward / risk if risk > 0 else np.nan
+        rows.append({
+            "buy_zone_low": round(float(buy_low), 2),
+            "buy_zone_high": round(float(buy_high), 2),
+            "best_buy_price": round(float(best_buy), 2),
+            "buy_trigger": trigger,
+            "stop_loss": round(float(stop), 2),
+            "sell_zone_low": round(float(sell_low), 2),
+            "sell_zone_high": round(float(sell_high), 2),
+            "best_sell_price": round(float(sell_low), 2),
+            "risk_reward": round(float(rr), 2) if np.isfinite(rr) else np.nan,
+            "trade_note": note,
+        })
+    add = pd.DataFrame(rows, index=out.index)
+    for col in add.columns:
+        out[col] = add[col]
+    return out
+
+
 def _num(value: Any, digits: int = 2) -> str:
     try:
         v = float(value)

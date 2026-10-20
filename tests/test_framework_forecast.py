@@ -10,7 +10,7 @@ import pytest
 from spec_radar import learning
 from spec_radar.altdata import AnnBundle, apply_announcements
 from spec_radar.forecast import load_params, predict_forecasts
-from spec_radar.framework import add_active_framework, add_potential_framework
+from spec_radar.framework import add_active_framework, add_potential_framework, add_trade_levels
 
 
 def _base_row(**overrides):
@@ -64,6 +64,22 @@ def test_forecast_predictions_are_bounded():
         assert out.iloc[0]["target_high"] >= 10.0
         assert out.iloc[0]["target_high_bull"] >= out.iloc[0]["target_high"]
         assert out.iloc[0]["launch_window"] in {"1-3", "4-10", "11-20", "20+"}
+
+
+def test_trade_levels_are_ordered():
+    df = pd.DataFrame([{
+        "close_signal": 20.0, "current_price": 21.0, "ma5": 20.2, "ma10": 19.8,
+        "ma20": 19.0, "ma60": 17.5, "atr14": 0.04, "dist_low60": 0.15,
+        "dist_high60": -0.10, "target_high_low": 21.5, "target_high": 22.0,
+        "target_high_bull": 23.0,
+    }])
+    out = add_trade_levels(df, "potential")
+    row = out.iloc[0]
+    assert row["buy_zone_low"] < row["buy_zone_high"]
+    assert row["stop_loss"] < row["best_buy_price"]
+    assert row["sell_zone_low"] > row["best_buy_price"]
+    assert row["sell_zone_high"] >= row["sell_zone_low"]
+    assert row["risk_reward"] > 0
 
 
 def test_announcement_redline_excludes_stock():

@@ -631,6 +631,10 @@ def score_model(
     df["signal_date"] = signal_date.strftime("%Y-%m-%d")
     df["amount20_yi"] = df["avg_amount20_yi"]
     df["turnover20_pct"] = df["turnover_mean20"] * 100
+    df["current_price"] = (
+        pd.to_numeric(df["price"], errors="coerce").fillna(df["close_signal"])
+        if "price" in df.columns else df["close_signal"]
+    )
     df["theme_label"] = df["theme_names"].map(lambda x: " / ".join(x) if isinstance(x, (list, tuple)) else str(x or ""))
     df["risk_flags_text"] = df["risk_flags"].map(lambda x: "；".join(x) if x else "模型未见硬伤（不代表低风险）")
     df["name"] = df["name"].fillna("").astype(str)
