@@ -79,6 +79,7 @@ def _outcome(
     stop: float,
     horizon: int,
     cost: float,
+    target2: float = np.nan,
 ) -> Optional[Dict[str, Any]]:
     pos = int(g["date"].searchsorted(date, side="left"))
     if pos < 0 or pos >= len(g) or g["date"].iloc[pos] != date:
@@ -88,6 +89,8 @@ def _outcome(
     entry = float(g["open"].iloc[pos + 1])
     if not np.isfinite(entry) or entry <= 0:
         return None
+    if not np.isfinite(target) or target <= entry * 1.005:
+        target = target2
     if not np.isfinite(target) or target <= entry * 1.005:
         return None
     if not np.isfinite(stop) or stop >= entry:
@@ -149,6 +152,14 @@ def run_backtest(
     for date in eval_dates:
         sub = panel[panel["date"] <= date]
         bench_sub = bench[bench["date"] <= date] if not bench.empty else pd.DataFrame()
+        mkt_ret20 = np.nan
+        mkt_above_ma20 = False
+        mkt_above_ma60 = False
+        if not bench_sub.empty and len(bench_sub) >= 60:
+            bc = pd.to_numeric(bench_sub["close"], errors="coerce")
+            mkt_ret20 = float(bc.iloc[-1] / bc.iloc[-21] - 1.0)
+            mkt_above_ma20 = bool(bc.iloc[-1] >= bc.tail(20).mean())
+            mkt_above_ma60 = bool(bc.iloc[-1] >= bc.tail(60).mean())
         date_signals: List[Dict[str, Any]] = []
         for code, g in sub.groupby("code", sort=False):
             if len(g) < min_history:
@@ -169,7 +180,17 @@ def run_backtest(
             if feat.get("bars", 0) < min_history:
                 continue
             six = _six_proxy(pd.Series(feat), cap, is_st)
-            base = {"code": str(code).zfill(6), "date": str(date.date()), "name": str(info.get("name", "")), **six}
+            base = {
+                "code": str(code).zfill(6), "date": str(date.date()), "name": str(info.get("name", "")), **six,
+                "ret20": float(feat.get("ret20", np.nan) or np.nan),
+                "dd52": float(feat.get("dd52", np.nan) or np.nan),
+                "amount20_yi": float(feat.get("avg_amount20_yi", np.nan) or np.nan),
+                "turnover20": float(feat.get("turnover_mean20", np.nan) or np.nan),
+                "float_mcap_yi": cap,
+                "mkt_ret20": mkt_ret20,
+                "mkt_above_ma20": mkt_above_ma20,
+                "mkt_above_ma60": mkt_above_ma60,
+            }
             if wave.get("wave_stage_code") in ("early3", "main3") and wave.get("wave_pattern_score", 0) >= 60:
                 date_signals.append({
                     **base, "strategy": "wave3_typical",
@@ -215,13 +236,31 @@ def run_backtest(
         uni = _universe_return(date, groups, horizon)
         date_rows.append({"date": str(date.date()), "signals": len(date_signals), "universe_ret": uni})
         sig_df = pd.DataFrame(date_signals)
+        opt = sig_df[
+            sig_df["strategy"].isin(["first_wave", "wave3_pre"])
+            & sig_df["mkt_above_ma20"].fillna(False).astype(bool)
+            & (pd.to_numeric(sig_df["setup_proxy"], errors="coerce").fillna(0) >= 10)
+            & (pd.to_numeric(sig_df["ret20"], errors="coerce").fillna(0) < 0.15)
+        ].copy()
+        if not opt.empty:
+            opt = opt.sort_values("score", ascending=False).drop_duplicates("code").head(5)
+            for _, sig in opt.iterrows():
+                out = _outcome(groups.get(str(sig["code"]), pd.DataFrame()), date, float(sig["target"]), float(sig["stop"]), horizon, cost, float(sig.get("target2", np.nan)))
+                if out is None:
+                    continue
+                out.update({k: sig.get(k) for k in ("code", "name", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60")})
+                out["strategy"] = "wave_optimized"
+                out["signal_date"] = str(date.date())
+                out["universe_ret"] = uni
+                out["excess"] = out["ret"] - uni if np.isfinite(uni) else np.nan
+                rows.append(out)
         for strategy, sdf in sig_df.groupby("strategy"):
             selected = sdf.sort_values("score", ascending=False).head(top_n)
             for _, sig in selected.iterrows():
                 out = _outcome(groups.get(str(sig["code"]), pd.DataFrame()), date, float(sig["target"]), float(sig["stop"]), horizon, cost)
                 if out is None:
                     continue
-                out.update({k: sig.get(k) for k in ("code", "name", "strategy", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text")})
+                out.update({k: sig.get(k) for k in ("code", "name", "strategy", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60")})
                 out["signal_date"] = str(date.date())
                 out["universe_ret"] = uni
                 out["excess"] = out["ret"] - uni if np.isfinite(uni) else np.nan
@@ -246,8 +285,26 @@ def run_backtest(
             "avg_mae": float(pd.to_numeric(g["mae"], errors="coerce").mean()),
             "avg_hold_days": float(horizon),
         }
+    split_date = eval_dates[int(len(eval_dates) * 0.6)]
+    for strategy, metrics in results.items():
+        g = trades[trades["strategy"] == strategy].copy()
+        g["_date"] = pd.to_datetime(g["signal_date"])
+        tr = g[g["_date"] < split_date]
+        te = g[g["_date"] >= split_date]
+        def _split_stats(z: pd.DataFrame) -> Dict[str, Any]:
+            if z.empty:
+                return {"trades": 0, "avg_excess": None, "win_rate": None}
+            ex = pd.to_numeric(z["excess"], errors="coerce").dropna()
+            return {
+                "trades": int(len(z)),
+                "avg_excess": float(ex.mean()) if len(ex) else None,
+                "win_rate": float((ex > 0).mean()) if len(ex) else None,
+            }
+        metrics["train"] = _split_stats(tr)
+        metrics["test"] = _split_stats(te)
     return {
         "generated_at": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "split_date": str(split_date.date()),
         "horizon_days": horizon,
         "step_days": step,
         "top_n_per_date": top_n,

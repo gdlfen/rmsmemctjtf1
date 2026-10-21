@@ -585,7 +585,48 @@ def run_scan(
                         first, _ = apply_announcements(first, ann_bundle)
                         first = first[~first.get("ann_hard_excluded", False)].copy()
                     first["first_wave_rank"] = np.arange(1, len(first) + 1)
-            wave_lists = {"typical": typical, "pre": pre, "first": first}
+            optimized = pd.DataFrame()
+            if bool((macro or {}).get("index_above_ma20", False)):
+                opt_parts = []
+                for opt_label, opt_frame in (("first", first), ("pre3", pre)):
+                    if opt_frame is None or opt_frame.empty:
+                        continue
+                    o = opt_frame.copy()
+                    o["opt_source"] = opt_label
+                    o["opt_quality"] = (
+                        (pd.to_numeric(o.get("setup_score"), errors="coerce").fillna(0) >= 10)
+                        | (pd.to_numeric(o.get("check_count"), errors="coerce").fillna(0) >= 6)
+                    )
+                    o["opt_ret20"] = pd.to_numeric(o.get("ret20"), errors="coerce")
+                    o["opt_score"] = np.where(
+                        opt_label == "first",
+                        pd.to_numeric(o.get("first_wave_composite"), errors="coerce").fillna(0),
+                        pd.to_numeric(o.get("wave_composite"), errors="coerce").fillna(0),
+                    )
+                    opt_parts.append(o[o["opt_quality"] & (o["opt_ret20"] < 0.15)])
+                if opt_parts:
+                    optimized = pd.concat(opt_parts, ignore_index=True)
+                    is_first = optimized["opt_source"].eq("first")
+                    def _choose(first_col: str, wave_col: str) -> pd.Series:
+                        a = optimized[first_col] if first_col in optimized else pd.Series(np.nan, index=optimized.index)
+                        b = optimized[wave_col] if wave_col in optimized else pd.Series(np.nan, index=optimized.index)
+                        return pd.Series(np.where(is_first, a, b), index=optimized.index)
+                    optimized["opt_stage"] = _choose("first_wave_stage", "wave_stage")
+                    optimized["opt_target1"] = _choose("first_wave_target1", "wave_target1")
+                    optimized["opt_target2"] = _choose("first_wave_target2", "wave_target2")
+                    optimized["opt_buy_low"] = _choose("first_wave_buy_low", "wave_buy_low")
+                    optimized["opt_buy_high"] = _choose("first_wave_buy_high", "wave_buy_high")
+                    optimized["opt_sell_low"] = _choose("first_wave_sell_low", "wave_sell_low")
+                    optimized["opt_sell_high"] = _choose("first_wave_sell_high", "wave_sell_high")
+                    optimized["opt_stop"] = _choose("first_wave_stop", "wave_stop")
+                    optimized["opt_launch_window"] = _choose("first_wave_launch_window", "wave_launch_window")
+                    optimized["opt_launch_days"] = _choose("first_wave_launch_days", "wave_launch_days")
+                    optimized["opt_launch_prob"] = _choose("first_wave_launch_prob", "wave_launch_prob")
+                    optimized["opt_rr"] = _choose("first_wave_risk_reward", "wave_risk_reward")
+                    optimized = optimized.sort_values(["opt_score", "opt_ret20"], ascending=[False, True])
+                    optimized = optimized.drop_duplicates("code", keep="first").head(10).reset_index(drop=True)
+                    optimized["opt_rank"] = np.arange(1, len(optimized) + 1)
+            wave_lists = {"typical": typical, "pre": pre, "first": first, "optimized": optimized}
             composite_map = wave_all[["code", "wave_composite"]].drop_duplicates("code")
             if not potential.empty and "wave_composite" not in potential:
                 potential = potential.merge(composite_map, on="code", how="left")
@@ -656,6 +697,8 @@ def run_scan(
         "wave_typical": int(len(wave_lists.get("typical", []))),
         "wave_pre": int(len(wave_lists.get("pre", []))),
         "wave_first": int(len(wave_lists.get("first", []))),
+        "wave_optimized": int(len(wave_lists.get("optimized", []))),
+        "index_above_ma20": bool((macro or {}).get("index_above_ma20", False)),
     }
     if auto_learning:
         try:

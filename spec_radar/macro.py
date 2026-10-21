@@ -221,6 +221,8 @@ def build_macro_context(
         "label": label,
         "trend_score": float(trend_score),
         "index_ret20": float(index_ret20),
+        "index_above_ma20": bool(stats_by_secid.get("1.000001", {}).get("above_ma20", False)),
+        "index_above_ma60": bool(stats_by_secid.get("1.000001", {}).get("above_ma60", False)),
         "breadth_day": breadth_day,
         "breadth_60": breadth_60,
         "vol_percentile": float(vol_pct),

@@ -677,6 +677,7 @@ def render_wave(result: dict) -> None:
     typical = lists.get("typical")
     pre = lists.get("pre")
     first = lists.get("first")
+    optimized = lists.get("optimized")
     st.markdown("### 三浪雷达 · 第一浪启动前 → 一浪 → 二浪 → 三浪")
     st.caption(
         "启发式几何/量价识别，不是严格艾略特计数。只使用信号日及之前 K 线；"
@@ -684,9 +685,34 @@ def render_wave(result: dict) -> None:
         "目标/买点/止损按信号日收盘计算；当前价是快照价，可能已偏离；若现价已越过原目标，表中目标自动上移到上方下一目标。买点不是现价指令。"
         "范围：本次通过六维/六格硬门槛的两个榜单候选，不是全市场逐只展示。"
     )
-    if (typical is None or typical.empty) and (pre is None or pre.empty) and (first is None or first.empty):
+    if (typical is None or typical.empty) and (pre is None or pre.empty) and (first is None or first.empty) and (optimized is None or optimized.empty):
         st.info("本次候选池中没有识别出满足条件的三浪结构。可增大扫描深度或放宽六维/六格门槛后再试。")
         return
+
+    def _otable(frame: pd.DataFrame) -> pd.DataFrame:
+        d = frame.head(10).copy()
+        source = d.get("opt_source", "").map({"first": "第一浪", "pre3": "第三浪启动前"}) if "opt_source" in d else "—"
+        target = (
+            d["opt_target1"].map(lambda x: num(x, 2)) + " / " + d["opt_target2"].map(lambda x: num(x, 2))
+        ) if "opt_target1" in d and "opt_target2" in d else "—"
+        plan = (
+            "买 " + d["opt_buy_low"].map(lambda x: num(x, 2)) + "–" + d["opt_buy_high"].map(lambda x: num(x, 2))
+            + "｜卖 " + d["opt_sell_low"].map(lambda x: num(x, 2)) + "–" + d["opt_sell_high"].map(lambda x: num(x, 2))
+            + "｜损 " + d["opt_stop"].map(lambda x: num(x, 2))
+        ) if "opt_buy_low" in d else "—"
+        launch = (
+            d["opt_launch_window"].astype(str) + " / 第" + d["opt_launch_days"].map(lambda x: num(x, 0)) + "日"
+        ) if "opt_launch_window" in d and "opt_launch_days" in d else "—"
+        return pd.DataFrame({
+            "#": d.get("opt_rank", pd.Series(range(1, len(d) + 1))).astype(int),
+            "结构": source, "代码": d["code"], "名称": d["name"],
+            "阶段": d.get("opt_stage", "—"),
+            "当前价": d["current_price"].map(lambda x: num(x, 2)) if "current_price" in d else "—",
+            "目标1 / 目标2": target, "买卖/止损": plan, "启动": launch,
+            "启动概率": d["opt_launch_prob"].map(lambda x: pct(x)) if "opt_launch_prob" in d else "—",
+            "优化分": d["opt_score"].map(lambda x: num(x, 0)) if "opt_score" in d else "—",
+            "六维/六格": d.get("opt_quality", "—").map(lambda x: "通过" if bool(x) else "—"),
+        })
 
     def _wtable(frame: pd.DataFrame) -> pd.DataFrame:
         d = frame.head(30).copy()
@@ -761,6 +787,16 @@ def render_wave(result: dict) -> None:
             "财务质量": d["profitability_score"].map(lambda x: num(x, 0)) if "profitability_score" in d else "—",
             "来源": d.get("wave_model", "—"),
         })
+
+    st.markdown("#### 稳健组合 · 历史回测优化")
+    st.caption("条件：上证站上 MA20；第一浪或第三浪启动前；六维≥10（或六格≥6）；20日涨幅<15%。这是对历史回测筛选条件的实盘映射，不是收益保证。")
+    if optimized is None or optimized.empty:
+        if not bool(result.get("macro", {}).get("index_above_ma20", False)):
+            st.info("当前上证指数未站上 MA20，稳健组合暂停；这是回测中的市场过滤条件。")
+        else:
+            st.info("当前市场条件满足，但没有同时通过结构、六维/六格和涨幅约束的标的。")
+    else:
+        st.dataframe(_otable(optimized), width="stretch", hide_index=True, height=min(360, 40 + 34 * len(optimized)))
 
     st.markdown("#### 典型三浪 · 已进入三浪/主升")
     st.caption("第三浪初期或主升段；重点看回踩一浪高点/MA20 的承接，不追加速末端。")
@@ -928,6 +964,7 @@ def render_macro(result: dict, playbook: dict, n_pot: int, n_act: int) -> None:
         unsafe_allow_html=True,
     )
     render_validation()
+    render_wave_backtest()
     render_forecast_method(result)
     render_learning(result, n_pot, n_act)
 
@@ -977,6 +1014,64 @@ def render_validation() -> None:
             with st.expander(f"{title} · 分调仓日明细"):
                 st.dataframe(show, hide_index=True, width="stretch")
     st.caption("验证结论只用于判断因子方向与稳定性；样本短、风格单一时，历史表现不能外推。")
+
+
+def render_wave_backtest() -> None:
+    st.markdown("### 三浪 / 第一浪历史回测")
+    path = ROOT / "data" / "wave_backtest.json"
+    if not path.exists():
+        st.info("尚未生成回测。运行 `python scripts/run_wave_backtest.py`。")
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        st.warning(f"回测报告读取失败：{exc}")
+        return
+    if data.get("error"):
+        st.warning(data["error"])
+        return
+    st.caption(
+        f"样本期 {data.get('start_date')} 至 {data.get('end_date')}，每 {data.get('step_days')} 个交易日一个截面，"
+        f"未来 {data.get('horizon_days')} 日；训练/样本外分界 {data.get('split_date','—')}；"
+        f"次日开盘入场，单边成本 {pct(data.get('cost_one_way'))}。"
+        "股票池为灾备包当前存续股票，存在幸存者偏差。"
+    )
+    labels = {
+        "wave3_typical": "三浪·典型（初期/主升）",
+        "wave3_pre": "三浪·启动前",
+        "first_wave": "第一浪·启动前（六维代理通过）",
+        "first_wave_raw": "第一浪·未过六维代理（对照）",
+        "wave_optimized": "稳健组合（MA20+六维10）",
+    }
+    rows = []
+    for key, m in (data.get("results") or {}).items():
+        tr = m.get("train") or {}
+        te = m.get("test") or {}
+        rows.append({
+            "策略": labels.get(key, key),
+            "交易数": int(m.get("trades", 0)),
+            "截面数": int(m.get("dates", 0)),
+            "胜率": pct(m.get("win_rate")),
+            "平均收益": pct(m.get("avg_ret")),
+            "平均超额": pct(m.get("avg_excess")),
+            "训练超额": pct(tr.get("avg_excess")),
+            "样本外超额": pct(te.get("avg_excess")),
+            "目标触达": pct(m.get("target_rate")),
+            "止损率": pct(m.get("stop_rate")),
+            "平均MFE": pct(m.get("avg_mfe")),
+            "平均MAE": pct(m.get("avg_mae")),
+        })
+    if rows:
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=240)
+    st.caption(
+        "稳健组合：上证站上 MA20、六维代理≥10、20日涨幅<15%，从第一浪/第三浪启动前中取综合分前5。"
+        "历史公告/减持/立案无法完整点时重建；回测是近似上界，不是实盘准确率。"
+    )
+    notes = data.get("notes") or []
+    if notes:
+        with st.expander("回测口径与限制", expanded=False):
+            for n in notes:
+                st.write("- " + str(n))
 
 
 def render_forecast_method(result: dict) -> None:
@@ -1287,6 +1382,7 @@ def main() -> None:
   <span class="badge">情绪 · {esc((meta.get('sentiment') or {}).get('label','未知'))}</span>
   <span class="badge gray">排序 · {'拉升基准优先' if meta.get('sort_mode') == 'rally' else ('拉升上限优先' if meta.get('sort_mode') == 'rally_max' else ('财务质量优先' if meta.get('sort_mode') in {'fundamental', 'profitability'} else '投机分优先'))}</span>
   <span class="badge">三浪 · 典型 {int(meta.get('wave_typical', 0))} / 启动前 {int(meta.get('wave_pre', 0))} / 第一浪 {int(meta.get('wave_first', 0))}</span>
+  <span class="badge">稳健组合 · {int(meta.get('wave_optimized', 0))}</span>
   <span class="badge green">全市场 {int(meta.get('universe_total',0)):,} 只 · 基础域 {int(meta.get('eligible_base',0)):,}</span>
   <span class="badge gray">耗时 {num(meta.get('elapsed_sec'),1)}s · 模型 {esc(meta.get('model_version'))}</span>
 </div>

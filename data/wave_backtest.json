@@ -1,12 +1,13 @@
 {
-  "generated_at": "2026-10-21 13:41:24",
+  "generated_at": "2026-10-21 17:34:20",
+  "split_date": "2026-05-22",
   "horizon_days": 10,
   "step_days": 5,
   "top_n_per_date": 10,
   "cost_one_way": 0.002,
   "start_date": "2025-11-05",
   "end_date": "2026-09-21",
-  "trades": 1418,
+  "trades": 1510,
   "results": {
     "first_wave": {
       "trades": 395,
@@ -19,7 +20,17 @@
       "stop_rate": 0.03291139240506329,
       "avg_mfe": 0.09200492604905028,
       "avg_mae": -0.06065224494118943,
-      "avg_hold_days": 10.0
+      "avg_hold_days": 10.0,
+      "train": {
+        "trades": 219,
+        "avg_excess": -0.009007729664677952,
+        "win_rate": 0.410958904109589
+      },
+      "test": {
+        "trades": 176,
+        "avg_excess": 0.0068182719980228595,
+        "win_rate": 0.4602272727272727
+      }
     },
     "first_wave_raw": {
       "trades": 235,
@@ -32,7 +43,17 @@
       "stop_rate": 0.07659574468085106,
       "avg_mfe": 0.07300822672846088,
       "avg_mae": -0.0559121087585637,
-      "avg_hold_days": 10.0
+      "avg_hold_days": 10.0,
+      "train": {
+        "trades": 165,
+        "avg_excess": -0.03251335859983731,
+        "win_rate": 0.2787878787878788
+      },
+      "test": {
+        "trades": 70,
+        "avg_excess": 0.01966183304411405,
+        "win_rate": 0.5285714285714286
+      }
     },
     "wave3_pre": {
       "trades": 403,
@@ -45,7 +66,17 @@
       "stop_rate": 0.27791563275434245,
       "avg_mfe": 0.10969249045110875,
       "avg_mae": -0.07310670780179378,
-      "avg_hold_days": 10.0
+      "avg_hold_days": 10.0,
+      "train": {
+        "trades": 224,
+        "avg_excess": -0.0032698888270104023,
+        "win_rate": 0.4375
+      },
+      "test": {
+        "trades": 179,
+        "avg_excess": -0.00575580260969073,
+        "win_rate": 0.43575418994413406
+      }
     },
     "wave3_typical": {
       "trades": 385,
@@ -58,7 +89,40 @@
       "stop_rate": 0.15324675324675324,
       "avg_mfe": 0.09895145977540189,
       "avg_mae": -0.08448401922903993,
-      "avg_hold_days": 10.0
+      "avg_hold_days": 10.0,
+      "train": {
+        "trades": 208,
+        "avg_excess": -0.018703882533882936,
+        "win_rate": 0.42788461538461536
+      },
+      "test": {
+        "trades": 177,
+        "avg_excess": -0.006375326199312032,
+        "win_rate": 0.4350282485875706
+      }
+    },
+    "wave_optimized": {
+      "trades": 92,
+      "dates": 20,
+      "win_rate": 0.4891304347826087,
+      "avg_ret": 0.029960860161788363,
+      "median_ret": -0.001611522633744809,
+      "avg_excess": 0.01530253711449132,
+      "target_rate": 0.17391304347826086,
+      "stop_rate": 0.10869565217391304,
+      "avg_mfe": 0.10587742994164205,
+      "avg_mae": -0.05679667469123487,
+      "avg_hold_days": 10.0,
+      "train": {
+        "trades": 62,
+        "avg_excess": 0.010409338115548105,
+        "win_rate": 0.43548387096774194
+      },
+      "test": {
+        "trades": 30,
+        "avg_excess": 0.02541514837897397,
+        "win_rate": 0.43333333333333335
+      }
     }
   },
   "dates": [
