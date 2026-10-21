@@ -304,6 +304,9 @@ def run_scan(
     _report(progress, "评分", 0.90, "运行潜在投机与活跃投机双模型")
     potential = score_model(features, snapshot, model_cfg, "potential", settings, macro, signal_ts)
     active = score_model(features, snapshot, model_cfg, "active", settings, macro, signal_ts)
+    # 第一浪候选不强制通过三浪/六维/六格门槛，保留评分全集用于独立筛选。
+    potential_all = potential.copy()
+    active_all = active.copy()
     if potential.empty:
         warnings.append("潜在投机模型没有符合条件的股票：可放宽板块/市值筛选或增大扫描深度")
     if active.empty:
@@ -412,6 +415,15 @@ def run_scan(
         out["rally_space_pct"] = base
         out["rally_max_pct"] = bull
         out["rally_score"] = (base * 100.0).clip(0, 100)
+        if "first_wave_pattern_score" in out:
+            out["first_wave_composite"] = (
+                0.35 * pd.to_numeric(out["first_wave_pattern_score"], errors="coerce").fillna(0)
+                + 0.25 * pd.to_numeric(out.get("first_wave_launch_prob"), errors="coerce").fillna(0) * 100
+                + 0.15 * pd.to_numeric(out.get("first_wave_upside_bull"), errors="coerce").fillna(0).clip(0, 0.6) * 100
+                + 0.10 * pd.to_numeric(out.get("profitability_score"), errors="coerce").fillna(0)
+                + 0.08 * pd.to_numeric(out.get("theme_fit"), errors="coerce").fillna(0) * 100
+                + 0.07 * pd.to_numeric(out.get("score"), errors="coerce").fillna(0)
+            ).clip(0, 100)
         return out
 
     potential = _add_rally_space(potential)
@@ -449,7 +461,7 @@ def run_scan(
     potential = adjust_wave_targets_for_display(_sort_frame(potential))
     active = adjust_wave_targets_for_display(_sort_frame(active))
     # 三浪雷达：从两个榜单的合格候选中再按“结构+赔率+概率+盈利/主题”排序。
-    wave_lists = {"typical": pd.DataFrame(), "pre": pd.DataFrame()}
+    wave_lists = {"typical": pd.DataFrame(), "pre": pd.DataFrame(), "first": pd.DataFrame()}
     wave_parts = []
     for label, frame in (("潜在", potential), ("活跃", active)):
         if not frame.empty and "wave_stage_code" in frame:
@@ -512,7 +524,42 @@ def run_scan(
                         pd.to_numeric(frame["wave_target2"], errors="coerce") / cur - 1.0
                     ).clip(lower=0)
                     frame["wave_rank"] = np.arange(1, len(frame) + 1)
-            wave_lists = {"typical": typical, "pre": pre}
+
+            # 第一浪启动前：平台收敛/低点抬高/缩量，且尚未进入已完成的一浪结构。
+            # 第一浪与三浪可能是不同级别的结构，允许重叠；这里只按第一浪自身条件筛。
+            first_parts = []
+            for label, base_frame in (("潜在", potential_all), ("活跃", active_all)):
+                if not base_frame.empty and "first_wave_stage_code" in base_frame:
+                    part = base_frame.copy()
+                    part["wave_model"] = label
+                    first_parts.append(part)
+            first = pd.DataFrame()
+            if first_parts:
+                all_first = pd.concat(first_parts, ignore_index=True)
+                all_first = all_first[
+                    all_first["first_wave_stage_code"].isin(["pre1", "pre1_break"])
+                    & (pd.to_numeric(all_first["first_wave_pattern_score"], errors="coerce").fillna(0) >= 55)
+                    & (pd.to_numeric(all_first["first_wave_launch_prob"], errors="coerce").fillna(0) >= 0.30)
+                ].copy()
+                if not all_first.empty:
+                    def _fcol(name: str, default: float = 0.0) -> pd.Series:
+                        if name not in all_first:
+                            return pd.Series(default, index=all_first.index, dtype=float)
+                        return pd.to_numeric(all_first[name], errors="coerce").fillna(default)
+
+                    all_first["first_wave_composite"] = (
+                        0.35 * _fcol("first_wave_pattern_score")
+                        + 0.25 * _fcol("first_wave_launch_prob") * 100
+                        + 0.15 * _fcol("first_wave_upside_bull").clip(0, 0.6) * 100
+                        + 0.10 * _fcol("profitability_score")
+                        + 0.08 * _fcol("theme_fit") * 100
+                        + 0.07 * _fcol("score")
+                    ).clip(0, 100)
+                    first = all_first[all_first["first_wave_composite"] >= 45].copy()
+                    first = first.sort_values(["first_wave_composite", "first_wave_upside_bull"], ascending=[False, False])
+                    first = first.drop_duplicates("code", keep="first").reset_index(drop=True)
+                    first["first_wave_rank"] = np.arange(1, len(first) + 1)
+            wave_lists = {"typical": typical, "pre": pre, "first": first}
             composite_map = wave_all[["code", "wave_composite"]].drop_duplicates("code")
             if not potential.empty and "wave_composite" not in potential:
                 potential = potential.merge(composite_map, on="code", how="left")
@@ -582,6 +629,7 @@ def run_scan(
         "sort_mode": settings.sort_mode,
         "wave_typical": int(len(wave_lists.get("typical", []))),
         "wave_pre": int(len(wave_lists.get("pre", []))),
+        "wave_first": int(len(wave_lists.get("first", []))),
     }
     if auto_learning:
         try:

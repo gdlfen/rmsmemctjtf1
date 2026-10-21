@@ -51,7 +51,7 @@ st.set_page_config(
 )
 
 MODEL_COLORS = {"potential": "#d97706", "active": "#c2410c"}
-MODEL_NAMES = {"potential": "潜在投机", "active": "活跃投机"}
+MODEL_NAMES = {"potential": "潜在投机", "active": "活跃投机", "first_wave": "第一浪"}
 UI_CACHE_VERSION = "2026.10-r5-rally-base"
 
 
@@ -281,6 +281,8 @@ def table_view(df: pd.DataFrame, n: int) -> pd.DataFrame:
         "起爆窗口": (d["launch_window"].astype(str) + " / 加权第" + d["expected_launch_days"].map(lambda x: num(x, 0)) + "日") if "launch_window" in d and "expected_launch_days" in d else (d["launch_window"] if "launch_window" in d else "—"),
         "三浪阶段": d["wave_stage"] if "wave_stage" in d else "—",
         "三浪分": d["wave_composite"].map(lambda x: num(x, 0)) if "wave_composite" in d else "—",
+        "第一浪阶段": d["first_wave_stage"] if "first_wave_stage" in d else "—",
+        "第一浪分": d["first_wave_composite"].map(lambda x: num(x, 0)) if "first_wave_composite" in d else "—",
         "框架": framework,
         "PE(TTM)": d["pe_ttm"].map(lambda x: num(x, 1)),
         "风险提示": d["risk_flags_text"],
@@ -320,6 +322,15 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
         "wave_upside_bull": "三浪上涨空间", "wave_buy_low": "三浪买点下沿", "wave_buy_high": "三浪买点上沿",
         "wave_sell_low": "三浪卖点下沿", "wave_sell_high": "三浪卖点上沿", "wave_stop": "三浪止损",
         "wave_risk_reward": "三浪盈亏比", "wave_composite": "三浪综合分", "wave_note": "三浪说明",
+        "first_wave_stage": "第一浪阶段", "first_wave_pattern_score": "第一浪结构分",
+        "first_wave_position": "第一浪平台位置", "first_wave_launch_prob": "第一浪启动概率",
+        "first_wave_launch_window": "第一浪启动窗口", "first_wave_launch_days": "第一浪预计日",
+        "first_wave_target1": "第一浪目标1", "first_wave_target2": "第一浪目标2",
+        "first_wave_upside_base": "第一浪基准空间", "first_wave_upside_bull": "第一浪上限空间",
+        "first_wave_buy_low": "第一浪买点下沿", "first_wave_buy_high": "第一浪买点上沿",
+        "first_wave_sell_low": "第一浪卖点下沿", "first_wave_sell_high": "第一浪卖点上沿",
+        "first_wave_stop": "第一浪止损", "first_wave_risk_reward": "第一浪盈亏比",
+        "first_wave_composite": "第一浪综合分", "first_wave_note": "第一浪说明",
         "lhb_net_yi": "龙虎榜净买入(亿)", "consecutive_limit_up": "连板数",
     }
     component_cols = {c: f"分项-{COMPONENT_LABELS.get(c.replace('c_', ''), c)}" for c in d.columns if c.startswith("c_")}
@@ -437,6 +448,12 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
             code = str(row["code"])
             records.setdefault(code, {"name": row["name"], "models": []})
             records[code]["models"].append((key, int(row["rank"])))
+    first_frame = (result.get("wave_lists") or {}).get("first")
+    if first_frame is not None and not first_frame.empty:
+        for _, row in first_frame.head(30).iterrows():
+            code = str(row["code"])
+            records.setdefault(code, {"name": row["name"], "models": []})
+            records[code]["models"].append(("first_wave", int(row.get("first_wave_rank", 0))))
     if not records:
         st.info("没有可查看的标的。")
         return
@@ -451,12 +468,19 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
     if len(models) > 1:
         choice = st.radio("按哪个模型查看", models, horizontal=True, format_func=lambda k: MODEL_NAMES[k])
         model_key = choice
-    df = pot if model_key == "potential" else act
+    if model_key == "potential":
+        df = pot
+    elif model_key == "active":
+        df = act
+    else:
+        df = first_frame
     hit = df[df["code"].astype(str) == sel]
     if hit.empty:
         st.warning("该标的在当前模型中不可用。")
         return
-    row = hit.iloc[0]
+    row = hit.iloc[0].copy()
+    if model_key == "first_wave":
+        row["rank"] = row.get("first_wave_rank", row.get("rank"))
     st.markdown(
         f"""<div class="detail-head">
         <div class="dh-name">{esc(row['name'])} <span class="pc-code">{esc(row['code'])}</span></div>
@@ -509,6 +533,24 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
             unsafe_allow_html=True,
         )
         st.caption(str(row.get("wave_note") or ""))
+
+    if str(row.get("first_wave_stage") or "非典型") != "非典型" and pd.notna(row.get("first_wave_pattern_score")):
+        st.markdown("#### 第一浪启动前 / 临界分析")
+        st.markdown(
+            metric_grid([
+                ("第一浪阶段", str(row.get("first_wave_stage")), f"平台结构分 {num(row.get('first_wave_pattern_score'),0)}"),
+                ("平台位置", num(row.get("first_wave_position"), 2), f"平台区间 {pct(row.get('first_wave_base_range'))}"),
+                ("启动概率", pct(row.get("first_wave_launch_prob")), f"窗口 {row.get('first_wave_launch_window','—')} / 第 {num(row.get('first_wave_launch_days'),0)} 日"),
+                ("第一浪目标1", num(row.get("first_wave_target1"), 2), pct(row.get("first_wave_upside_base"))),
+                ("第一浪目标2", num(row.get("first_wave_target2"), 2), pct(row.get("first_wave_upside_bull"))),
+                ("第一浪买点", f"{num(row.get('first_wave_buy_low'),2)}–{num(row.get('first_wave_buy_high'),2)}", "突破/回踩确认"),
+                ("第一浪卖点", f"{num(row.get('first_wave_sell_low'),2)}–{num(row.get('first_wave_sell_high'),2)}", "目标区分批"),
+                ("平台/结构止损", num(row.get("first_wave_stop"), 2), "跌破平台下沿失效"),
+                ("第一浪综合", num(row.get("first_wave_composite"), 0), f"盈亏比 {num(row.get('first_wave_risk_reward'),2)}"),
+            ]),
+            unsafe_allow_html=True,
+        )
+        st.caption(str(row.get("first_wave_note") or ""))
 
     st.markdown("#### 最佳买点 / 卖点（条件计划）")
     st.markdown(
@@ -634,14 +676,15 @@ def render_wave(result: dict) -> None:
     lists = result.get("wave_lists") or {}
     typical = lists.get("typical")
     pre = lists.get("pre")
-    st.markdown("### 三浪雷达 · 一浪上涨 → 二浪回调 → 三浪启动")
+    first = lists.get("first")
+    st.markdown("### 三浪雷达 · 第一浪启动前 → 一浪 → 二浪 → 三浪")
     st.caption(
         "启发式几何/量价识别，不是严格艾略特计数。只使用信号日及之前 K 线；"
         "“启动前”是条件观察，不是保证会启动。三浪结构失败时，跌破二浪低点即失效。"
         "目标/买点/止损按信号日收盘计算；当前价是快照价，可能已偏离；若现价已越过原目标，表中目标自动上移到上方下一目标。买点不是现价指令。"
         "范围：本次通过六维/六格硬门槛的两个榜单候选，不是全市场逐只展示。"
     )
-    if (typical is None or typical.empty) and (pre is None or pre.empty):
+    if (typical is None or typical.empty) and (pre is None or pre.empty) and (first is None or first.empty):
         st.info("本次候选池中没有识别出满足条件的三浪结构。可增大扫描深度或放宽六维/六格门槛后再试。")
         return
 
@@ -682,6 +725,43 @@ def render_wave(result: dict) -> None:
             "财务质量": d["profitability_score"].map(lambda x: num(x, 0)) if "profitability_score" in d else "—",
             "来源": d.get("wave_model", "—"),
         })
+    def _ftable(frame: pd.DataFrame) -> pd.DataFrame:
+        d = frame.head(30).copy()
+        target = (
+            d["first_wave_target1"].map(lambda x: num(x, 2)) + " (" + d["first_wave_upside_base"].map(lambda x: pct(x)) + ") / "
+            + d["first_wave_target2"].map(lambda x: num(x, 2)) + " (" + d["first_wave_upside_bull"].map(lambda x: pct(x)) + ")"
+        ) if "first_wave_target1" in d and "first_wave_target2" in d else "—"
+        plan = (
+            "买 " + d["first_wave_buy_low"].map(lambda x: num(x, 2)) + "–"
+            + d["first_wave_buy_high"].map(lambda x: num(x, 2))
+            + "｜卖 " + d["first_wave_sell_low"].map(lambda x: num(x, 2)) + "–"
+            + d["first_wave_sell_high"].map(lambda x: num(x, 2))
+            + "｜损 " + d["first_wave_stop"].map(lambda x: num(x, 2))
+        ) if "first_wave_buy_low" in d else "—"
+        launch = (
+            d["first_wave_launch_window"].astype(str) + " / 第"
+            + d["first_wave_launch_days"].map(lambda x: num(x, 0))
+            + "日"
+        ) if "first_wave_launch_window" in d and "first_wave_launch_days" in d else "—"
+        return pd.DataFrame({
+            "#": d.get("first_wave_rank", pd.Series(range(1, len(d) + 1))).astype(int),
+            "代码": d["code"],
+            "名称": d["name"],
+            "阶段": d.get("first_wave_stage", "—"),
+            "当前价": d["current_price"].map(lambda x: num(x, 2)) if "current_price" in d else "—",
+            "目标1 / 目标2": target,
+            "买卖/止损计划": plan,
+            "启动窗口": launch,
+            "启动概率": d["first_wave_launch_prob"].map(lambda x: pct(x)) if "first_wave_launch_prob" in d else "—",
+            "结构分": d["first_wave_pattern_score"].map(lambda x: num(x, 0)) if "first_wave_pattern_score" in d else "—",
+            "平台位置": d["first_wave_position"].map(lambda x: num(x, 2)) if "first_wave_position" in d else "—",
+            "平台区间": (d["first_wave_base_range"].map(lambda x: pct(x)) if "first_wave_base_range" in d else "—"),
+            "盈亏比": d["first_wave_risk_reward"].map(lambda x: num(x, 2)) if "first_wave_risk_reward" in d else "—",
+            "第一浪综合": d["first_wave_composite"].map(lambda x: num(x, 0)) if "first_wave_composite" in d else "—",
+            "财务质量": d["profitability_score"].map(lambda x: num(x, 0)) if "profitability_score" in d else "—",
+            "来源": d.get("wave_model", "—"),
+        })
+
     st.markdown("#### 典型三浪 · 已进入三浪/主升")
     st.caption("第三浪初期或主升段；重点看回踩一浪高点/MA20 的承接，不追加速末端。")
     t = _wtable(typical) if typical is not None and not typical.empty else pd.DataFrame()
@@ -698,12 +778,22 @@ def render_wave(result: dict) -> None:
     else:
         st.dataframe(t, width="stretch", hide_index=True, height=380)
 
+    st.markdown("#### 潜在第一浪 · 启动前观察")
+    st.caption("平台收敛、低点抬高、量能萎缩，尚未有效突破平台上沿；第一浪为独立结构，不强制六维/六格，仍需公告/风险人工核对。突破/回踩确认才触发，不是现价买入指令。")
+    ft = _ftable(first) if first is not None and not first.empty else pd.DataFrame()
+    if ft.empty:
+        st.info("暂无处于第一浪启动前的候选。")
+    else:
+        st.dataframe(ft, width="stretch", hide_index=True, height=380)
+
     st.markdown(
         "<div class='warnbox'><b>三浪规则摘要：</b>一浪涨幅≥8%、二浪回撤 12%–82% 且不破一浪起点、"
         "二浪缩量、当前不破二浪低点；目标用一浪长度的 1.0/1.618/2.618 倍映射。"
         "三浪综合分 = 结构 32% + 启动概率 20% + 三浪空间 14% + 预期拉升 10% + 主题 9% + 双模型分 15%。"
         "“启动时间”按二浪时长、缩量和量能估计，仅为观察窗口。<br/>"
         "三浪失败/结构破坏：收盘跌破二浪低点；或突破后 3 日无法站稳一浪高点。"
+        "第一浪：平台≤42%、低点抬高、量能萎缩，放量站上平台上沿才确认；跌破平台下沿失效。"
+        "第一浪综合 = 结构 35% + 启动概率 25% + 空间 15% + 财务 10% + 主题 8% + 双模型分 7%。"
         "所有数值是研究用条件计划，不构成投资建议。</div>",
         unsafe_allow_html=True,
     )
@@ -1196,7 +1286,7 @@ def main() -> None:
   <span class="badge">市场 · {esc(macro.get('label'))}（{num(macro.get('risk_appetite'),0)}）</span>
   <span class="badge">情绪 · {esc((meta.get('sentiment') or {}).get('label','未知'))}</span>
   <span class="badge gray">排序 · {'拉升基准优先' if meta.get('sort_mode') == 'rally' else ('拉升上限优先' if meta.get('sort_mode') == 'rally_max' else ('财务质量优先' if meta.get('sort_mode') in {'fundamental', 'profitability'} else '投机分优先'))}</span>
-  <span class="badge">三浪 · 典型 {int(meta.get('wave_typical', 0))} / 启动前 {int(meta.get('wave_pre', 0))}</span>
+  <span class="badge">三浪 · 典型 {int(meta.get('wave_typical', 0))} / 启动前 {int(meta.get('wave_pre', 0))} / 第一浪 {int(meta.get('wave_first', 0))}</span>
   <span class="badge green">全市场 {int(meta.get('universe_total',0)):,} 只 · 基础域 {int(meta.get('eligible_base',0)):,}</span>
   <span class="badge gray">耗时 {num(meta.get('elapsed_sec'),1)}s · 模型 {esc(meta.get('model_version'))}</span>
 </div>

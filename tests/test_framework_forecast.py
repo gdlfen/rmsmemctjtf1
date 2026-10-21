@@ -11,7 +11,7 @@ from spec_radar import learning
 from spec_radar.altdata import AnnBundle, apply_announcements
 from spec_radar.forecast import load_params, predict_forecasts
 from spec_radar.framework import add_active_framework, add_potential_framework, add_trade_levels
-from spec_radar.wave import detect_wave
+from spec_radar.wave import detect_first_wave, detect_wave
 
 
 def _base_row(**overrides):
@@ -87,6 +87,24 @@ def test_wave_detection_synthetic():
     assert out["wave_pattern_score"] > 0
     assert out["wave_target2"] >= out["wave_target1"]
     assert out["wave_stop"] < out["wave_buy_low"]
+
+
+def test_first_wave_pre_launch_detection():
+    n = 140
+    base = 10.0 + 0.55 * np.sin(np.linspace(0, 8 * np.pi, n))
+    close = base.copy()
+    close[-1] = 10.45
+    df = pd.DataFrame({
+        "date": pd.bdate_range("2026-01-01", periods=n),
+        "open": close * 0.999, "high": close * 1.02,
+        "low": close * 0.98, "close": close,
+        "volume": np.linspace(1.6e6, 0.7e6, n),
+    })
+    out = detect_first_wave(df)
+    assert out["first_wave_stage"] in {"第一浪启动前", "第一浪临界"}
+    assert out["first_wave_pattern_score"] >= 55
+    assert out["first_wave_target2"] > out["first_wave_target1"] > 10.0
+    assert out["first_wave_stop"] < out["first_wave_buy_low"]
 
 
 def test_trade_levels_are_ordered():

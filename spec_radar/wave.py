@@ -236,6 +236,131 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
     return best
 
 
+
+def detect_first_wave(df: pd.DataFrame) -> Dict[str, Any]:
+    """识别“长期横盘/底部抬高、尚未启动第一浪”的候选。
+
+    第一浪启动前不是已经上涨的股票，而是：区间收敛、低点抬高、量能萎缩，
+    当前接近平台上沿但尚未有效突破。输出条件买点/目标/止损，全部启发式。
+    """
+    empty = {
+        "first_wave_pattern_score": 0.0, "first_wave_stage": "非典型",
+        "first_wave_stage_code": "none", "first_wave_position": np.nan,
+        "first_wave_launch_prob": np.nan, "first_wave_launch_window": "—",
+        "first_wave_launch_days": np.nan, "first_wave_target1": np.nan,
+        "first_wave_target2": np.nan, "first_wave_target3": np.nan,
+        "first_wave_upside_base": np.nan, "first_wave_upside_bull": np.nan,
+        "first_wave_buy_low": np.nan, "first_wave_buy_high": np.nan,
+        "first_wave_stop": np.nan, "first_wave_sell_low": np.nan,
+        "first_wave_sell_high": np.nan, "first_wave_risk_reward": np.nan,
+        "first_wave_profit_score": 0.0, "first_wave_base_high": np.nan,
+        "first_wave_base_low": np.nan, "first_wave_base_range": np.nan,
+        "first_wave_base_days": np.nan,
+        "first_wave_note": "K线不足或未形成第一浪平台结构",
+    }
+    if df is None or len(df) < 100:
+        return empty
+    d = df.tail(280).reset_index(drop=True).copy()
+    for col in ("high", "low", "close", "volume"):
+        if col not in d:
+            return empty
+        d[col] = pd.to_numeric(d[col], errors="coerce")
+    d = d.dropna(subset=["high", "low", "close"]).reset_index(drop=True)
+    if len(d) < 100:
+        return empty
+    close = d["close"].to_numpy(dtype=float)
+    current = float(close[-1])
+    base = d.tail(60)
+    base_high = float(base["high"].max())
+    base_low = float(base["low"].min())
+    if not np.isfinite(base_high) or not np.isfinite(base_low) or base_high <= base_low or base_low <= 0:
+        return empty
+    base_range = base_high / base_low - 1.0
+    if base_range > 0.42:
+        return empty
+    # 已经明显突破平台/阶段涨幅过大，不属于“启动前”。
+    if current > base_high * 1.035 or current < base_high * 0.88:
+        return empty
+    ret60 = current / float(close[-61]) - 1.0 if len(close) > 61 else 0.0
+    if ret60 > 0.38 or ret60 < -0.25:
+        return empty
+    ma20 = float(pd.to_numeric(d["close"], errors="coerce").rolling(20).mean().iloc[-1])
+    ma60 = float(pd.to_numeric(d["close"], errors="coerce").rolling(60).mean().iloc[-1])
+    low20 = float(d["low"].tail(20).min())
+    prior_low = float(d["low"].tail(60).head(40).min())
+    higher_low = low20 >= prior_low * 1.01
+    vol20 = float(pd.to_numeric(d["volume"], errors="coerce").tail(20).mean())
+    vol60 = float(pd.to_numeric(d["volume"], errors="coerce").tail(60).mean())
+    dryup = vol20 / max(vol60, 1e-9) if np.isfinite(vol20) and np.isfinite(vol60) else 1.0
+    atr_ratio = _atr(d) / max(current, 1e-9)
+    prox = float(np.clip(current / base_high, 0.85, 1.035))
+    pattern = 44.0
+    pattern += 15.0 if 0.10 <= base_range <= 0.30 else (8.0 if base_range <= 0.38 else 0.0)
+    pattern += 12.0 if current >= base_high * 0.95 else (6.0 if current >= base_high * 0.90 else 0.0)
+    pattern += 8.0 if higher_low else 0.0
+    pattern += 8.0 if dryup < 0.9 else (4.0 if dryup < 1.05 else 0.0)
+    pattern += 6.0 if atr_ratio < 0.055 else 0.0
+    pattern += 5.0 if np.isfinite(ma20) and current >= ma20 else 0.0
+    pattern += 4.0 if np.isfinite(ma20) and np.isfinite(ma60) and ma20 >= ma60 * 0.98 else 0.0
+    pattern += 4.0 if ret60 < 0.22 else 0.0
+    pattern = float(np.clip(pattern, 0, 100))
+    launch_prob = 0.22 + 0.0042 * pattern + 0.14 * np.clip(prox - 0.9, 0, 0.15) + 0.07 * np.clip(1 - dryup, 0, 1)
+    launch_prob = float(np.clip(launch_prob, 0.10, 0.86))
+    base_days = 60
+    launch_days = float(np.clip(2 + 0.07 * base_days + 5 * max(0.0, 1 - dryup) + 4 * max(0.0, 1 - prox), 2, 20))
+    window = "1-3" if launch_days <= 3 else ("4-10" if launch_days <= 10 else "11-20")
+    height = base_high - base_low
+    t1 = max(current * 1.06, base_high + height * 0.80)
+    t2 = max(t1 * 1.06, base_high + height * 1.50)
+    t3 = max(t2 * 1.08, base_high + height * 2.20)
+    upside_base = max(t1 / current - 1.0, 0.0)
+    upside_bull = max(t2 / current - 1.0, 0.0)
+    # 平台突破买点：在平台上沿附近，不在远离平台的上方追。
+    buy_low = min(current * 0.985, base_high * 1.005)
+    buy_high = min(current * 1.005, base_high * 1.015)
+    if buy_high <= buy_low:
+        buy_high = buy_low * 1.01
+    stop = min(base_low * 0.97, ma20 * 0.96 if np.isfinite(ma20) else base_low * 0.97, buy_low * 0.95)
+    sell_low, sell_high = t1, t2
+    risk = max((buy_low + buy_high) / 2 - stop, current * 0.01)
+    reward = max(sell_low - (buy_low + buy_high) / 2, 0)
+    rr = reward / risk if risk > 0 else np.nan
+    profit_score = (
+        0.45 * pattern
+        + 0.25 * launch_prob * 100
+        + 0.18 * min(upside_bull * 100, 45)
+        + 0.12 * min(rr * 20, 20)
+    )
+    stage = "第一浪临界" if current >= base_high * 0.995 else "第一浪启动前"
+    code = "pre1_break" if current >= base_high * 0.995 else "pre1"
+    return {
+        "first_wave_pattern_score": round(pattern, 1),
+        "first_wave_stage": stage,
+        "first_wave_stage_code": code,
+        "first_wave_position": round(float(np.clip((current - base_low) / max(base_high - base_low, 1e-9), 0, 1.2)), 3),
+        "first_wave_launch_prob": round(launch_prob, 4),
+        "first_wave_launch_window": window,
+        "first_wave_launch_days": round(launch_days, 1),
+        "first_wave_target1": round(t1, 2),
+        "first_wave_target2": round(t2, 2),
+        "first_wave_target3": round(t3, 2),
+        "first_wave_upside_base": round(upside_base, 4),
+        "first_wave_upside_bull": round(upside_bull, 4),
+        "first_wave_buy_low": round(buy_low, 2),
+        "first_wave_buy_high": round(buy_high, 2),
+        "first_wave_stop": round(stop, 2),
+        "first_wave_sell_low": round(sell_low, 2),
+        "first_wave_sell_high": round(sell_high, 2),
+        "first_wave_risk_reward": round(float(rr), 2) if np.isfinite(rr) else np.nan,
+        "first_wave_profit_score": round(float(np.clip(profit_score, 0, 100)), 1),
+        "first_wave_base_high": round(base_high, 2),
+        "first_wave_base_low": round(base_low, 2),
+        "first_wave_base_range": round(base_range, 4),
+        "first_wave_base_days": base_days,
+        "first_wave_note": "平台收敛、低点抬高/量能萎缩；放量站上平台上沿才确认第一浪启动，跌破平台下沿则结构失效。",
+    }
+
+
 def adjust_wave_targets_for_display(df: pd.DataFrame) -> pd.DataFrame:
     """现价已越过信号日目标时，把展示目标上移到现价上方的下一目标。"""
     if df is None or df.empty or "wave_target1" not in df.columns:
@@ -281,6 +406,7 @@ def build_wave_frame(panel: pd.DataFrame) -> pd.DataFrame:
         if len(g) < 70:
             continue
         res = detect_wave(g)
+        res.update(detect_first_wave(g))
         res["code"] = str(code).zfill(6)
         rows.append(res)
     if not rows:
