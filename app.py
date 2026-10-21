@@ -1316,8 +1316,13 @@ def main() -> None:
         """
 <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; flex-wrap:wrap;">
   <div>
+<<<<<<< HEAD
     <h1>📡 A股双轨投机雷达V3.0   田夫开发</h1>
     <div class="hero-sub">全 A 股扫描 · 潜在/活跃双模型 · 预期拉升排序 · 三浪结构 · 严格使用信号日及之前数据</div>
+=======
+    <h1>📡 A股双轨投机雷达v2.0 田夫开发</h1>
+    <div class="hero-sub">全 A 股扫描 · 潜在投机 / 活跃投机双模型 · 严格使用信号日及之前数据</div>
+>>>>>>> origin/main
   </div>
 </div>
         """,
