@@ -130,6 +130,7 @@ def run_backtest(
     top_n: int = 10,
     cost: float = 0.002,
     min_history: int = 120,
+    include_trades: bool = False,
 ) -> Dict[str, Any]:
     panel = load_stock_panel()
     market = load_market_panel("1.000001")
@@ -155,11 +156,17 @@ def run_backtest(
         mkt_ret20 = np.nan
         mkt_above_ma20 = False
         mkt_above_ma60 = False
+        mkt_ma20_slope = np.nan
+        mkt_days_above_ma20 = 0
         if not bench_sub.empty and len(bench_sub) >= 60:
             bc = pd.to_numeric(bench_sub["close"], errors="coerce")
             mkt_ret20 = float(bc.iloc[-1] / bc.iloc[-21] - 1.0)
-            mkt_above_ma20 = bool(bc.iloc[-1] >= bc.tail(20).mean())
+            ma20s = bc.rolling(20).mean()
+            mkt_above_ma20 = bool(bc.iloc[-1] >= ma20s.iloc[-1])
             mkt_above_ma60 = bool(bc.iloc[-1] >= bc.tail(60).mean())
+            if len(ma20s.dropna()) > 6:
+                mkt_ma20_slope = float(ma20s.iloc[-1] / ma20s.iloc[-6] - 1.0)
+            mkt_days_above_ma20 = int((bc.tail(20) > ma20s.tail(20)).sum())
         date_signals: List[Dict[str, Any]] = []
         for code, g in sub.groupby("code", sort=False):
             if len(g) < min_history:
@@ -190,6 +197,8 @@ def run_backtest(
                 "mkt_ret20": mkt_ret20,
                 "mkt_above_ma20": mkt_above_ma20,
                 "mkt_above_ma60": mkt_above_ma60,
+                "mkt_ma20_slope": mkt_ma20_slope,
+                "mkt_days_above_ma20": mkt_days_above_ma20,
             }
             if wave.get("wave_stage_code") in ("early3", "main3") and wave.get("wave_pattern_score", 0) >= 60:
                 date_signals.append({
@@ -248,7 +257,7 @@ def run_backtest(
                 out = _outcome(groups.get(str(sig["code"]), pd.DataFrame()), date, float(sig["target"]), float(sig["stop"]), horizon, cost, float(sig.get("target2", np.nan)))
                 if out is None:
                     continue
-                out.update({k: sig.get(k) for k in ("code", "name", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60")})
+                out.update({k: sig.get(k) for k in ("code", "name", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60", "mkt_ma20_slope", "mkt_days_above_ma20")})
                 out["strategy"] = "wave_optimized"
                 out["signal_date"] = str(date.date())
                 out["universe_ret"] = uni
@@ -260,7 +269,7 @@ def run_backtest(
                 out = _outcome(groups.get(str(sig["code"]), pd.DataFrame()), date, float(sig["target"]), float(sig["stop"]), horizon, cost)
                 if out is None:
                     continue
-                out.update({k: sig.get(k) for k in ("code", "name", "strategy", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60")})
+                out.update({k: sig.get(k) for k in ("code", "name", "strategy", "score", "stage", "launch_prob", "six_pass", "setup_proxy", "check_proxy", "six_proxy_text", "ret20", "dd52", "amount20_yi", "turnover20", "float_mcap_yi", "mkt_ret20", "mkt_above_ma20", "mkt_above_ma60", "mkt_ma20_slope", "mkt_days_above_ma20")})
                 out["signal_date"] = str(date.date())
                 out["universe_ret"] = uni
                 out["excess"] = out["ret"] - uni if np.isfinite(uni) else np.nan
@@ -284,6 +293,30 @@ def run_backtest(
             "avg_mfe": float(pd.to_numeric(g["mfe"], errors="coerce").mean()),
             "avg_mae": float(pd.to_numeric(g["mae"], errors="coerce").mean()),
             "avg_hold_days": float(horizon),
+        }
+    portfolio = {}
+    opt = trades[trades["strategy"] == "wave_optimized"].copy()
+    if not opt.empty:
+        co = opt.groupby("signal_date").agg(
+            ret=("ret", "mean"), uni=("universe_ret", "mean"), n=("code", "size")
+        ).reset_index()
+        co["date"] = pd.to_datetime(co["signal_date"])
+        co = co.sort_values("date").reset_index(drop=True)
+        co["port"] = co["ret"].rolling(2, min_periods=1).mean()
+        co["bench"] = co["uni"].rolling(2, min_periods=1).mean()
+        co["ex"] = co["port"] - co["bench"]
+        co["q"] = co["date"].dt.to_period("Q").astype(str)
+        portfolio = {
+            "cohorts": int(len(co)),
+            "mean_port_ret": float(co["port"].mean()),
+            "mean_bench_ret": float(co["bench"].mean()),
+            "mean_excess": float(co["ex"].mean()),
+            "win_rate": float((co["ex"] > 0).mean()),
+            "compound_port": float((1 + co["port"]).prod() - 1),
+            "compound_bench": float((1 + co["bench"]).prod() - 1),
+            "compound_excess": float((1 + co["port"]).prod() / (1 + co["bench"]).prod() - 1),
+            "quarterly": co.groupby("q")["ex"].mean().round(6).to_dict(),
+            "note": "50/50 overlapping capital approximation; not a live NAV.",
         }
     split_date = eval_dates[int(len(eval_dates) * 0.6)]
     for strategy, metrics in results.items():
@@ -313,7 +346,9 @@ def run_backtest(
         "end_date": str(eval_dates[-1].date()),
         "trades": len(trades),
         "results": results,
+        "portfolio": portfolio,
         "dates": date_rows,
+        **({"trade_rows": trades.to_dict("records")} if include_trades else {}),
         "notes": [
             "仅覆盖灾备包内 840 只股票，存在幸存者偏差。",
             "历史公告/减持/立案无法完整点时重建，回测未计入；实盘第一浪候选会单独核查。",

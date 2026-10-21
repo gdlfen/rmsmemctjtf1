@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-10-21 17:34:20",
+  "generated_at": "2026-10-21 19:22:49",
   "split_date": "2026-05-22",
   "horizon_days": 10,
   "step_days": 5,
@@ -124,6 +124,23 @@
         "win_rate": 0.43333333333333335
       }
     }
+  },
+  "portfolio": {
+    "cohorts": 20,
+    "mean_port_ret": 0.0210729596768465,
+    "mean_bench_ret": 0.014141974250070072,
+    "mean_excess": 0.006930985426776427,
+    "win_rate": 0.55,
+    "compound_port": 0.4737506357098602,
+    "compound_bench": 0.29892297421610503,
+    "compound_excess": 0.13459432542507987,
+    "quarterly": {
+      "2025Q4": -0.024772,
+      "2026Q1": 0.014538,
+      "2026Q2": 0.01646,
+      "2026Q3": 0.012449
+    },
+    "note": "50/50 overlapping capital approximation; not a live NAV."
   },
   "dates": [
     {

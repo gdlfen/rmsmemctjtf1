@@ -788,11 +788,11 @@ def render_wave(result: dict) -> None:
             "来源": d.get("wave_model", "—"),
         })
 
-    st.markdown("#### 稳健组合 · 历史回测优化")
+    st.markdown("#### 优化组合 · 历史回测优化")
     st.caption("条件：上证站上 MA20；第一浪或第三浪启动前；六维≥10（或六格≥6）；20日涨幅<15%。这是对历史回测筛选条件的实盘映射，不是收益保证。")
     if optimized is None or optimized.empty:
         if not bool(result.get("macro", {}).get("index_above_ma20", False)):
-            st.info("当前上证指数未站上 MA20，稳健组合暂停；这是回测中的市场过滤条件。")
+            st.info("当前上证指数未站上 MA20，优化组合暂停；这是回测中的市场过滤条件。")
         else:
             st.info("当前市场条件满足，但没有同时通过结构、六维/六格和涨幅约束的标的。")
     else:
@@ -1041,7 +1041,7 @@ def render_wave_backtest() -> None:
         "wave3_pre": "三浪·启动前",
         "first_wave": "第一浪·启动前（六维代理通过）",
         "first_wave_raw": "第一浪·未过六维代理（对照）",
-        "wave_optimized": "稳健组合（MA20+六维10）",
+        "wave_optimized": "优化组合（MA20+六维10）",
     }
     rows = []
     for key, m in (data.get("results") or {}).items():
@@ -1064,7 +1064,7 @@ def render_wave_backtest() -> None:
     if rows:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch", height=240)
     st.caption(
-        "稳健组合：上证站上 MA20、六维代理≥10、20日涨幅<15%，从第一浪/第三浪启动前中取综合分前5。"
+        "优化组合：上证站上 MA20、六维代理≥10、20日涨幅<15%，从第一浪/第三浪启动前中取综合分前5。"
         "历史公告/减持/立案无法完整点时重建；回测是近似上界，不是实盘准确率。"
     )
     notes = data.get("notes") or []
@@ -1382,7 +1382,7 @@ def main() -> None:
   <span class="badge">情绪 · {esc((meta.get('sentiment') or {}).get('label','未知'))}</span>
   <span class="badge gray">排序 · {'拉升基准优先' if meta.get('sort_mode') == 'rally' else ('拉升上限优先' if meta.get('sort_mode') == 'rally_max' else ('财务质量优先' if meta.get('sort_mode') in {'fundamental', 'profitability'} else '投机分优先'))}</span>
   <span class="badge">三浪 · 典型 {int(meta.get('wave_typical', 0))} / 启动前 {int(meta.get('wave_pre', 0))} / 第一浪 {int(meta.get('wave_first', 0))}</span>
-  <span class="badge">稳健组合 · {int(meta.get('wave_optimized', 0))}</span>
+  <span class="badge">优化组合 · {int(meta.get('wave_optimized', 0))}</span>
   <span class="badge green">全市场 {int(meta.get('universe_total',0)):,} 只 · 基础域 {int(meta.get('eligible_base',0)):,}</span>
   <span class="badge gray">耗时 {num(meta.get('elapsed_sec'),1)}s · 模型 {esc(meta.get('model_version'))}</span>
 </div>
