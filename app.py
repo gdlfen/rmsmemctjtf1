@@ -44,7 +44,7 @@ from spec_radar.pipeline import run_scan  # noqa: E402
 from spec_radar.scoring import COMPONENT_LABELS, COMPONENT_NOTES  # noqa: E402
 
 st.set_page_config(
-    page_title="A股双轨投机雷达",
+    page_title="A股双轨投机雷达V3.0 田夫",
     page_icon="📡",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -689,6 +689,25 @@ def render_wave(result: dict) -> None:
         st.info("本次候选池中没有识别出满足条件的三浪结构。可增大扫描深度或放宽六维/六格门槛后再试。")
         return
 
+    signal_date = str((result.get("meta") or {}).get("signal_date", "latest"))
+    tables_for_download = []
+
+    def _download_table(table: pd.DataFrame, label: str, key: str) -> None:
+        if table is None or table.empty:
+            return
+        out = table.copy()
+        out.insert(0, "结果类型", label)
+        out.insert(1, "信号日", signal_date)
+        tables_for_download.append(out)
+        st.download_button(
+            f"⬇️ 下载{label} CSV",
+            out.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"wave_{key}_{signal_date}.csv",
+            mime="text/csv",
+            key=f"dl_wave_{key}",
+            width="stretch",
+        )
+
     def _otable(frame: pd.DataFrame) -> pd.DataFrame:
         d = frame.head(10).copy()
         source = d.get("opt_source", "").map({"first": "第一浪", "pre3": "第三浪启动前"}) if "opt_source" in d else "—"
@@ -796,7 +815,9 @@ def render_wave(result: dict) -> None:
         else:
             st.info("当前市场条件满足，但没有同时通过结构、六维/六格和涨幅约束的标的。")
     else:
-        st.dataframe(_otable(optimized), width="stretch", hide_index=True, height=min(360, 40 + 34 * len(optimized)))
+        ot = _otable(optimized)
+        st.dataframe(ot, width="stretch", hide_index=True, height=min(360, 40 + 34 * len(optimized)))
+        _download_table(ot, "优化组合", "optimized")
 
     st.markdown("#### 典型三浪 · 已进入三浪/主升")
     st.caption("第三浪初期或主升段；重点看回踩一浪高点/MA20 的承接，不追加速末端。")
@@ -805,6 +826,7 @@ def render_wave(result: dict) -> None:
         st.info("暂无已启动的典型三浪。")
     else:
         st.dataframe(t, width="stretch", hide_index=True, height=380)
+        _download_table(t, "典型三浪", "typical")
 
     st.markdown("#### 潜在第三浪 · 启动前观察")
     st.caption("二浪回调结束、等待放量突破一浪高点；启动前不是买点，突破/回踩确认才触发。")
@@ -813,6 +835,7 @@ def render_wave(result: dict) -> None:
         st.info("暂无处于启动前的三浪候选。")
     else:
         st.dataframe(t, width="stretch", hide_index=True, height=380)
+        _download_table(t, "第三浪启动前", "pre3")
 
     st.markdown("#### 潜在第一浪 · 启动前观察")
     st.caption("平台收敛、低点抬高、量能萎缩，尚未有效突破平台上沿；第一浪候选先通过六维/六格，再做公告/减持/立案等红线核查；通过后仍需人工复核实。突破/回踩确认才触发，不是现价买入指令。")
@@ -821,6 +844,18 @@ def render_wave(result: dict) -> None:
         st.info("暂无处于第一浪启动前的候选。")
     else:
         st.dataframe(ft, width="stretch", hide_index=True, height=380)
+        _download_table(ft, "第一浪启动前", "first")
+
+    if tables_for_download:
+        combined = pd.concat(tables_for_download, ignore_index=True, sort=False)
+        st.download_button(
+            "⬇️ 下载全部三浪/第一浪筛选结果 CSV",
+            combined.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"wave_screen_all_{signal_date}.csv",
+            mime="text/csv",
+            key="dl_wave_all",
+            width="stretch",
+        )
 
     st.markdown(
         "<div class='warnbox'><b>三浪规则摘要：</b>一浪涨幅≥8%、二浪回撤 12%–82% 且不破一浪起点、"
