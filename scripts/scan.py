@@ -32,6 +32,8 @@ def main() -> int:
     parser.add_argument("--n-active", type=int, default=None)
     parser.add_argument("--depth", type=int, default=300, choices=[200, 300, 500, 650], help="每个模型的粗筛池大小")
     parser.add_argument("--risk", default="auto", choices=["auto", "offensive", "defensive"])
+    parser.add_argument("--sort", default="profitability", choices=["profitability", "speculation"],
+                        help="榜单排序：盈利能力优先或投机综合分优先")
     parser.add_argument("--as-of", default="", help="YYYY-MM-DD，默认最近已收盘交易日")
     parser.add_argument("--outdir", default=str(ROOT / "reports"))
     parser.add_argument("--no-cache", action="store_true", help="强制绕过磁盘缓存重新抓取")
@@ -40,7 +42,7 @@ def main() -> int:
     n_act = args.n_active or args.n
     settings = ScanSettings(
         n_potential=n_pot, n_active=n_act, scan_potential=args.depth, scan_active=args.depth,
-        risk_mode=args.risk, as_of=args.as_of,
+        risk_mode=args.risk, sort_mode=args.sort, as_of=args.as_of,
     )
     model_cfg = load_model_config()
     playbook = load_macro_playbook()

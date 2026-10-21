@@ -205,7 +205,10 @@ def _model_eligibility(
     model = _MODEL_CACHE["cfg"][model_key]
     elig = model.get("eligibility", {})
     df = features.copy()
-    df["code"] = df.index.astype(str).str.zfill(6)
+    if "code" in df.columns:
+        df["code"] = df["code"].astype(str).str.zfill(6)
+    else:
+        df["code"] = df.index.astype(str).str.zfill(6)
     snap = snapshot.set_index("code")
     meta_cols = ["name", "board", "price", "float_mcap_yi", "pe_ttm", "pb", "net_profit",
                  "roe", "profit_yoy", "rev_yoy", "gross_margin", "main_inflow_yi",
@@ -631,6 +634,19 @@ def score_model(
     df["signal_date"] = signal_date.strftime("%Y-%m-%d")
     df["amount20_yi"] = df["avg_amount20_yi"]
     df["turnover20_pct"] = df["turnover_mean20"] * 100
+    # 盈利能力的横截面排序分：与“投机分”分开，避免把高 ROE 误当高投机。
+    profitability = (
+        0.35 * _rank(df["roe"], True, fill=20)
+        + 0.25 * _rank(df["profit_yoy"], True, fill=20)
+        + 0.15 * _rank(df["rev_yoy"], True, fill=20)
+        + 0.15 * _rank(df["gross_margin"], True, fill=20)
+        + 0.10 * _rank(df["net_profit"], True, fill=20)
+    )
+    df["profitability_score"] = (profitability - 15.0 * (df["net_profit"].fillna(-1) <= 0)).clip(0, 100)
+    df["profitability_label"] = np.select(
+        [df["net_profit"].fillna(-1) <= 0, df["roe"].fillna(-1) < 2],
+        ["亏损/微利", "低ROE"], default="盈利",
+    )
     df["current_price"] = (
         pd.to_numeric(df["price"], errors="coerce").fillna(df["close_signal"])
         if "price" in df.columns else df["close_signal"]
@@ -638,7 +654,10 @@ def score_model(
     df["theme_label"] = df["theme_names"].map(lambda x: " / ".join(x) if isinstance(x, (list, tuple)) else str(x or ""))
     df["risk_flags_text"] = df["risk_flags"].map(lambda x: "；".join(x) if x else "模型未见硬伤（不代表低风险）")
     df["name"] = df["name"].fillna("").astype(str)
-    df["code"] = df.index.astype(str).str.zfill(6)
+    if "code" in df.columns:
+        df["code"] = df["code"].astype(str).str.zfill(6)
+    else:
+        df["code"] = df.index.astype(str).str.zfill(6)
     df = df.sort_values(["score", "confidence", "amount20_yi"], ascending=[False, False, False])
     df = df.reset_index(drop=True)
     df["rank"] = np.arange(1, len(df) + 1)

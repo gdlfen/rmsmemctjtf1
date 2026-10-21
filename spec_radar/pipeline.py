@@ -54,6 +54,7 @@ from .scoring import (
     prefilter_codes,
     score_model,
 )
+from .wave import adjust_wave_targets_for_display, build_wave_frame
 from .themes import (
     CONCEPT_BLACKLIST,
     ThemeMapper,
@@ -268,6 +269,38 @@ def run_scan(
         features["concept_leader_pct"] = 0.0
         features["concept_count"] = 0.0
 
+    _report(progress, "三浪", 0.88, "识别一浪上涨/二浪回调/三浪启动结构")
+    # 在进入评分前固定 code 列，避免后续 reset_index/merge 改写代码。
+    if "code" not in features.columns:
+        features["code"] = features.index.astype(str).str.zfill(6)
+    else:
+        features["code"] = features["code"].astype(str).str.zfill(6)
+    features = features.reset_index(drop=True)
+    try:
+        wave_frame = build_wave_frame(panel)
+        if not wave_frame.empty:
+            wave_frame.index = wave_frame.index.astype(str).str.zfill(6)
+            wave_frame = wave_frame.reset_index()
+            wave_frame["code"] = wave_frame["code"].astype(str).str.zfill(6)
+            overlap = [c for c in wave_frame.columns if c in features.columns and c != "code"]
+            if overlap:
+                features = features.drop(columns=overlap)
+            features = features.merge(wave_frame, on="code", how="left")
+        else:
+            warnings.append("三浪结构识别：无足够 K 线样本")
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"三浪结构识别失败（不影响双榜）：{exc}")
+    for col, default in (
+        ("wave_pattern_score", 0.0), ("wave_stage", "非典型"), ("wave_stage_code", "none"),
+        ("wave_profit_score", 0.0), ("wave_launch_prob", np.nan),
+    ):
+        if col not in features:
+            features[col] = default
+        elif pd.api.types.is_numeric_dtype(features[col]):
+            features[col] = pd.to_numeric(features[col], errors="coerce").fillna(default)
+        else:
+            features[col] = features[col].fillna(default)
+
     _report(progress, "评分", 0.90, "运行潜在投机与活跃投机双模型")
     potential = score_model(features, snapshot, model_cfg, "potential", settings, macro, signal_ts)
     active = score_model(features, snapshot, model_cfg, "active", settings, macro, signal_ts)
@@ -361,6 +394,97 @@ def run_scan(
         potential = add_trade_levels(potential, "potential")
     if not active.empty:
         active = add_trade_levels(active, "active")
+    # 盈利能力排序与投机综合分排序分开；默认按用户要求“盈利优先”。
+    def _sort_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        out = frame.copy()
+        out["model_rank"] = out["rank"]
+        if settings.sort_mode == "profitability":
+            out = out.sort_values(
+                ["profitability_score", "score", "confidence", "amount20_yi"],
+                ascending=[False, False, False, False],
+            ).reset_index(drop=True)
+        else:
+            out = out.sort_values(
+                ["score", "confidence", "amount20_yi"],
+                ascending=[False, False, False],
+            ).reset_index(drop=True)
+        out["rank"] = np.arange(1, len(out) + 1)
+        return out
+
+    potential = adjust_wave_targets_for_display(_sort_frame(potential))
+    active = adjust_wave_targets_for_display(_sort_frame(active))
+    # 三浪雷达：从两个榜单的合格候选中再按“结构+赔率+概率+盈利/主题”排序。
+    wave_lists = {"typical": pd.DataFrame(), "pre": pd.DataFrame()}
+    wave_parts = []
+    for label, frame in (("潜在", potential), ("活跃", active)):
+        if not frame.empty and "wave_stage_code" in frame:
+            part = frame.copy()
+            part["wave_model"] = label
+            wave_parts.append(part)
+    if wave_parts:
+        wave_all = pd.concat(wave_parts, ignore_index=True)
+        if "wave_stage_code" in wave_all:
+            def _numcol(name: str, default: float = 0.0) -> pd.Series:
+                if name not in wave_all:
+                    return pd.Series(default, index=wave_all.index, dtype=float)
+                return pd.to_numeric(wave_all[name], errors="coerce").fillna(default)
+
+            wave_all["wave_composite"] = (
+                0.32 * _numcol("wave_pattern_score")
+                + 0.20 * _numcol("wave_launch_prob") * 100
+                + 0.14 * _numcol("wave_upside_bull").clip(0, 0.6) * 100
+                + 0.10 * _numcol("profitability_score")
+                + 0.09 * _numcol("theme_fit") * 100
+                + 0.15 * _numcol("score")
+            ).clip(0, 100)
+            wave_all = wave_all.sort_values(["wave_composite", "profitability_score"], ascending=[False, False])
+            wave_all = wave_all.drop_duplicates("code", keep="first").reset_index(drop=True)
+            typical = wave_all[
+                wave_all["wave_stage_code"].isin(["early3", "main3"])
+                & (_numcol("wave_pattern_score") >= 60)
+                & (_numcol("wave_upside_bull") >= 0.05)
+                & (wave_all["wave_composite"] >= 50)
+            ].copy()
+            pre = wave_all[
+                wave_all["wave_stage_code"].eq("pre3")
+                & (_numcol("wave_pattern_score") >= 60)
+                & (_numcol("wave_launch_prob") >= 0.35)
+                & (wave_all["wave_composite"] >= 50)
+            ].copy()
+            for frame in (typical, pre):
+                if not frame.empty:
+                    # 信号日目标若已被盘中现价越过，展示上方下一目标，避免“目标价低于现价”。
+                    cur = pd.to_numeric(frame.get("current_price"), errors="coerce")
+                    t1 = pd.to_numeric(frame.get("wave_target1"), errors="coerce")
+                    t2 = pd.to_numeric(frame.get("wave_target2"), errors="coerce")
+                    frame["wave_target1"] = np.where(cur.notna() & t1.notna() & (cur > t1), cur * 1.03, t1)
+                    frame["wave_target2"] = np.maximum(
+                        np.where(cur.notna() & t2.notna() & (cur > t2), cur * 1.06, t2),
+                        pd.to_numeric(frame["wave_target1"], errors="coerce") * 1.03,
+                    )
+                    frame["wave_sell_low"] = np.maximum(
+                        pd.to_numeric(frame.get("wave_sell_low"), errors="coerce"),
+                        pd.to_numeric(frame["wave_target1"], errors="coerce"),
+                    )
+                    frame["wave_sell_high"] = np.maximum(
+                        pd.to_numeric(frame.get("wave_sell_high"), errors="coerce"),
+                        pd.to_numeric(frame["wave_target2"], errors="coerce"),
+                    )
+                    frame["wave_upside_base"] = (
+                        pd.to_numeric(frame["wave_target1"], errors="coerce") / cur - 1.0
+                    ).clip(lower=0)
+                    frame["wave_upside_bull"] = (
+                        pd.to_numeric(frame["wave_target2"], errors="coerce") / cur - 1.0
+                    ).clip(lower=0)
+                    frame["wave_rank"] = np.arange(1, len(frame) + 1)
+            wave_lists = {"typical": typical, "pre": pre}
+            composite_map = wave_all[["code", "wave_composite"]].drop_duplicates("code")
+            if not potential.empty and "wave_composite" not in potential:
+                potential = potential.merge(composite_map, on="code", how="left")
+            if not active.empty and "wave_composite" not in active:
+                active = active.merge(composite_map, on="code", how="left")
     screens = build_daily_screens(features, snapshot, {"potential": potential, "active": active})
 
     elapsed = time.time() - started
@@ -422,6 +546,9 @@ def run_scan(
         "learning_calibrated": bool((learning_cal.get("models") or {}).get("potential", {}).get("ok")),
         "learning_evaluated": int(learning_eval.get("evaluated", 0)),
         "learning_pending": int(learning_eval.get("pending", 0)),
+        "sort_mode": settings.sort_mode,
+        "wave_typical": int(len(wave_lists.get("typical", []))),
+        "wave_pre": int(len(wave_lists.get("pre", []))),
     }
     if auto_learning:
         try:
@@ -450,6 +577,7 @@ def run_scan(
         "sentiment": sentiment,
         "announcements": ann_bundle,
         "screens": screens,
+        "wave_lists": wave_lists,
         "forecast_params": forecast_params,
         "learning_calibration": learning_cal,
     }

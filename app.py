@@ -52,7 +52,7 @@ st.set_page_config(
 
 MODEL_COLORS = {"potential": "#d97706", "active": "#c2410c"}
 MODEL_NAMES = {"potential": "潜在投机", "active": "活跃投机"}
-UI_CACHE_VERSION = "2026.10-r2-forecast"
+UI_CACHE_VERSION = "2026.10-r3-wave"
 
 
 # --------------------------------------------------------------------------- 样式
@@ -213,12 +213,13 @@ def cards_html(df: pd.DataFrame, model_key: str, n: int = 3) -> str:
     </div>
     <div>
       <div class="pc-score">{num(row.get('score'), 1)}</div>
-      <div class="pc-rank">#{int(row.get('rank'))} · 稳健度 {num(row.get('confidence'), 0)}</div>
+      <div class="pc-rank">盈利#{int(row.get('rank'))} · 投机#{num(row.get('model_rank'),0)} · 稳健度 {num(row.get('confidence'), 0)}</div>
     </div>
   </div>
   <div class="pc-theme">{theme}</div>
   <div class="pc-metrics">
     <div class="pc-metric">当前价<b>{num(row.get('current_price'), 2)}</b></div>
+    <div class="pc-metric">盈利分<b>{num(row.get('profitability_score'), 0)}</b></div>
     <div class="pc-metric">20日<b>{pct(row.get('ret20'))}</b></div>
     <div class="pc-metric">60日<b>{pct(row.get('ret60'))}</b></div>
     <div class="pc-metric">流通市值<b>{num(row.get('float_mcap_yi'), 0, '亿')}</b></div>
@@ -255,9 +256,12 @@ def table_view(df: pd.DataFrame, n: int) -> pd.DataFrame:
         framework = pd.Series("—", index=d.index)
     out = pd.DataFrame({
         "#": d["rank"].astype(int),
+        "投机#": d["model_rank"].astype(int) if "model_rank" in d else "—",
         "代码": d["code"],
         "名称": d["name"],
-        "综合分": d["score"].round(1),
+        "盈利分": d["profitability_score"].round(0) if "profitability_score" in d else "—",
+        "盈利状态": d["profitability_label"] if "profitability_label" in d else "—",
+        "投机分": d["score"].round(1),
         "稳健度": d["confidence"].round(0),
         "风险": d["risk_level"],
         "行业": d["industry"],
@@ -274,6 +278,8 @@ def table_view(df: pd.DataFrame, n: int) -> pd.DataFrame:
         "命中概率": d["p_hit_10d"].map(lambda x: pct(x)) if "p_hit_10d" in d else "—",
         "目标高价": d["target_high"].map(lambda x: num(x, 2)) if "target_high" in d else "—",
         "起爆窗口": (d["launch_window"].astype(str) + " / 加权第" + d["expected_launch_days"].map(lambda x: num(x, 0)) + "日") if "launch_window" in d and "expected_launch_days" in d else (d["launch_window"] if "launch_window" in d else "—"),
+        "三浪阶段": d["wave_stage"] if "wave_stage" in d else "—",
+        "三浪分": d["wave_composite"].map(lambda x: num(x, 0)) if "wave_composite" in d else "—",
         "框架": framework,
         "PE(TTM)": d["pe_ttm"].map(lambda x: num(x, 1)),
         "风险提示": d["risk_flags_text"],
@@ -285,7 +291,8 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
     d = df.copy()
     d["模型"] = MODEL_NAMES.get(model_key, model_key)
     rename = {
-        "rank": "排名", "code": "代码", "name": "名称", "score": "综合分",
+        "rank": "榜单排序", "model_rank": "投机排名", "code": "代码", "name": "名称", "score": "综合分",
+        "profitability_score": "盈利分", "profitability_label": "盈利状态",
         "confidence": "稳健度", "risk_level": "风险等级", "industry": "行业",
         "theme_label": "核心主题", "current_price": "当前价", "close_signal": "信号日收盘", "ret20": "20日涨幅",
         "ret60": "60日涨幅", "ret120": "120日涨幅", "ret250": "250日涨幅",
@@ -305,6 +312,12 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
         "sell_zone_low": "计划卖点下沿", "sell_zone_high": "计划卖点上沿",
         "best_sell_price": "最佳卖点参考", "risk_reward": "盈亏比", "buy_trigger": "买点触发条件",
         "ann_red_text": "公告红线", "ann_good_text": "公告催化",
+        "wave_stage": "三浪阶段", "wave_pattern_score": "三浪结构分", "wave_position": "三浪位置",
+        "wave_launch_prob": "三浪启动概率", "wave_launch_window": "三浪启动窗口",
+        "wave_launch_days": "三浪预计日", "wave_target1": "三浪目标1", "wave_target2": "三浪目标2",
+        "wave_upside_bull": "三浪上涨空间", "wave_buy_low": "三浪买点下沿", "wave_buy_high": "三浪买点上沿",
+        "wave_sell_low": "三浪卖点下沿", "wave_sell_high": "三浪卖点上沿", "wave_stop": "三浪止损",
+        "wave_risk_reward": "三浪盈亏比", "wave_composite": "三浪综合分", "wave_note": "三浪说明",
         "lhb_net_yi": "龙虎榜净买入(亿)", "consecutive_limit_up": "连板数",
     }
     component_cols = {c: f"分项-{COMPONENT_LABELS.get(c.replace('c_', ''), c)}" for c in d.columns if c.startswith("c_")}
@@ -445,7 +458,7 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
         f"""<div class="detail-head">
         <div class="dh-name">{esc(row['name'])} <span class="pc-code">{esc(row['code'])}</span></div>
         <div class="dh-meta">{esc(row['industry'])} · {esc(row['board'])} · 信号日 {esc(row.get('signal_date'))} ·
-        综合分 {num(row['score'])}（{MODEL_NAMES[model_key]} #{int(row['rank'])}）· 稳健度 {num(row['confidence'], 0)} · 风险 {esc(row['risk_level'])}</div>
+        综合分 {num(row['score'])}（盈利#{int(row['rank'])} / 投机#{num(row.get('model_rank'),0)} · {MODEL_NAMES[model_key]}）· 稳健度 {num(row['confidence'], 0)} · 风险 {esc(row['risk_level'])}</div>
         <div class="dh-theme">主题：{esc(row.get('theme_label') or '主题映射不足')}</div>
         </div>""",
         unsafe_allow_html=True,
@@ -458,6 +471,7 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
             ("60日涨幅", pct(row.get("ret60")), "距60日高 " + pct(row.get("dist_high60"))),
             ("流通市值", num(row.get("float_mcap_yi"), 1, "亿"), "20日均额 " + num(row.get("amount20_yi"), 2, "亿")),
             ("换手(20)", num(row.get("turnover20_pct"), 2, "%"), "RSI14 " + num(row.get("rsi14"), 1)),
+            ("盈利分", num(row.get("profitability_score"), 0), str(row.get("profitability_label") or "—")),
             ("PE(TTM)", num(row.get("pe_ttm"), 1), "PB " + num(row.get("pb"), 2)),
             ("净利同比", pct(row.get("profit_yoy")), "营收同比 " + pct(row.get("rev_yoy"))),
             ("风险罚分", num(row.get("penalty"), 1), "稳健度 " + num(row.get("confidence"), 0)),
@@ -473,6 +487,25 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
     st.caption("概率、目标价和起爆窗口是历史统计倾向，不是承诺；详见“宏观 / 方法”页的模型验证。")
     if row.get("launch_window_probs"):
         st.caption("起爆窗口概率分布：" + str(row.get("launch_window_probs")))
+    if str(row.get("wave_stage") or "非典型") != "非典型" and pd.notna(row.get("wave_pattern_score")):
+        st.markdown("#### 三浪结构分析")
+        st.markdown(
+            metric_grid([
+                ("三浪阶段", str(row.get("wave_stage")), f"结构分 {num(row.get('wave_pattern_score'),0)}"),
+                ("位置", num(row.get("wave_position"), 2), "0=一浪起点，1=一浪高点"),
+                ("一浪涨幅", pct(row.get("wave1_gain")), f"二浪回撤 {pct(row.get('wave2_retrace'))}"),
+                ("启动概率", pct(row.get("wave_launch_prob")), ("已启动" if str(row.get("wave_stage_code")) in {"early3","main3","late3","end3"} else f"窗口 {row.get('wave_launch_window','—')} / 第 {num(row.get('wave_launch_days'),0)} 日")),
+                ("三浪目标1", num(row.get("wave_target1"), 2), "一浪长度×1.0"),
+                ("三浪目标2", num(row.get("wave_target2"), 2), "一浪长度×1.618"),
+                ("三浪买点", f"{num(row.get('wave_buy_low'),2)}–{num(row.get('wave_buy_high'),2)}", "突破/回踩确认"),
+                ("三浪卖点", f"{num(row.get('wave_sell_low'),2)}–{num(row.get('wave_sell_high'),2)}", "目标区分批"),
+                ("结构止损", num(row.get("wave_stop"), 2), "跌破二浪低点/结构失效"),
+                ("三浪综合", num(row.get("wave_composite"), 0), f"盈亏比 {num(row.get('wave_risk_reward'),2)}"),
+            ]),
+            unsafe_allow_html=True,
+        )
+        st.caption(str(row.get("wave_note") or ""))
+
     st.markdown("#### 最佳买点 / 卖点（条件计划）")
     st.markdown(
         metric_grid([
@@ -590,6 +623,86 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
         raw = pd.DataFrame([{k: row.get(k) for k in raw_cols if k in row}]).T
         raw.columns = ["值"]
         st.dataframe(raw, width="stretch")
+
+
+def render_wave(result: dict) -> None:
+    """三浪雷达：典型三浪（已启动）与第三浪启动前。"""
+    lists = result.get("wave_lists") or {}
+    typical = lists.get("typical")
+    pre = lists.get("pre")
+    st.markdown("### 三浪雷达 · 一浪上涨 → 二浪回调 → 三浪启动")
+    st.caption(
+        "启发式几何/量价识别，不是严格艾略特计数。只使用信号日及之前 K 线；"
+        "“启动前”是条件观察，不是保证会启动。三浪结构失败时，跌破二浪低点即失效。"
+        "目标/买点/止损按信号日收盘计算；当前价是快照价，可能已偏离；若现价已越过原目标，表中目标自动上移到上方下一目标。买点不是现价指令。"
+        "范围：本次通过六维/六格硬门槛的两个榜单候选，不是全市场逐只展示。"
+    )
+    if (typical is None or typical.empty) and (pre is None or pre.empty):
+        st.info("本次候选池中没有识别出满足条件的三浪结构。可增大扫描深度或放宽六维/六格门槛后再试。")
+        return
+
+    def _wtable(frame: pd.DataFrame) -> pd.DataFrame:
+        d = frame.head(30).copy()
+        target = (
+            d["wave_target1"].map(lambda x: num(x, 2)) + " (" + d["wave_upside_base"].map(lambda x: pct(x)) + ") / "
+            + d["wave_target2"].map(lambda x: num(x, 2)) + " (" + d["wave_upside_bull"].map(lambda x: pct(x)) + ")"
+        ) if "wave_target1" in d and "wave_target2" in d else "—"
+        plan = (
+            "买 " + d["wave_buy_low"].map(lambda x: num(x, 2)) + "–"
+            + d["wave_buy_high"].map(lambda x: num(x, 2))
+            + "｜卖 " + d["wave_sell_low"].map(lambda x: num(x, 2)) + "–"
+            + d["wave_sell_high"].map(lambda x: num(x, 2))
+            + "｜损 " + d["wave_stop"].map(lambda x: num(x, 2))
+        ) if "wave_buy_low" in d else "—"
+        launch = (
+            d["wave_launch_window"].astype(str) + " / 第"
+            + d["wave_launch_days"].map(lambda x: "—" if not np.isfinite(float(x)) or float(x) <= 0 else num(x, 0))
+            + "日"
+        ) if "wave_launch_window" in d and "wave_launch_days" in d else "—"
+        if "wave_stage_code" in d:
+            launch = launch.mask(d["wave_stage_code"].isin(["early3", "main3", "late3", "end3"]), "已启动")
+        return pd.DataFrame({
+            "#": d.get("wave_rank", pd.Series(range(1, len(d) + 1))).astype(int),
+            "代码": d["code"],
+            "名称": d["name"],
+            "三浪阶段": d.get("wave_stage", "—"),
+            "当前价": d["current_price"].map(lambda x: num(x, 2)) if "current_price" in d else "—",
+            "目标1 / 目标2": target,
+            "买卖/止损计划": plan,
+            "启动窗口": launch,
+            "启动概率": d["wave_launch_prob"].map(lambda x: pct(x)) if "wave_launch_prob" in d else "—",
+            "结构分": d["wave_pattern_score"].map(lambda x: num(x, 0)) if "wave_pattern_score" in d else "—",
+            "位置": d["wave_position"].map(lambda x: num(x, 2)) if "wave_position" in d else "—",
+            "盈亏比": d["wave_risk_reward"].map(lambda x: num(x, 2)) if "wave_risk_reward" in d else "—",
+            "三浪综合": d["wave_composite"].map(lambda x: num(x, 0)) if "wave_composite" in d else "—",
+            "盈利分": d["profitability_score"].map(lambda x: num(x, 0)) if "profitability_score" in d else "—",
+            "来源": d.get("wave_model", "—"),
+        })
+    st.markdown("#### 典型三浪 · 已进入三浪/主升")
+    st.caption("第三浪初期或主升段；重点看回踩一浪高点/MA20 的承接，不追加速末端。")
+    t = _wtable(typical) if typical is not None and not typical.empty else pd.DataFrame()
+    if t.empty:
+        st.info("暂无已启动的典型三浪。")
+    else:
+        st.dataframe(t, width="stretch", hide_index=True, height=380)
+
+    st.markdown("#### 潜在第三浪 · 启动前观察")
+    st.caption("二浪回调结束、等待放量突破一浪高点；启动前不是买点，突破/回踩确认才触发。")
+    t = _wtable(pre) if pre is not None and not pre.empty else pd.DataFrame()
+    if t.empty:
+        st.info("暂无处于启动前的三浪候选。")
+    else:
+        st.dataframe(t, width="stretch", hide_index=True, height=380)
+
+    st.markdown(
+        "<div class='warnbox'><b>三浪规则摘要：</b>一浪涨幅≥8%、二浪回撤 12%–82% 且不破一浪起点、"
+        "二浪缩量、当前不破二浪低点；目标用一浪长度的 1.0/1.618/2.618 倍映射。"
+        "三浪综合分 = 结构 32% + 启动概率 20% + 空间 14% + 盈利 10% + 主题 9% + 双模型分 15%。"
+        "“启动时间”按二浪时长、缩量和量能估计，仅为观察窗口。<br/>"
+        "三浪失败/结构破坏：收盘跌破二浪低点；或突破后 3 日无法站稳一浪高点。"
+        "所有数值是研究用条件计划，不构成投资建议。</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def render_screens(result: dict) -> None:
@@ -907,6 +1020,13 @@ def sidebar(settings: ScanSettings) -> tuple[ScanSettings, int, int, bool]:
         help="分别用于潜在榜与活跃榜的粗筛池；深度越大，覆盖越广、首次抓取越久。",
     )
     dep = {"快速 · 200/200": 200, "标准 · 300/300": 300, "深度 · 500/500": 500}[depth]
+    sort_label = st.sidebar.selectbox(
+        "榜单排序",
+        options=["盈利能力优先（推荐）", "投机综合分优先"],
+        index=0 if settings.sort_mode == "profitability" else 1,
+        help="两种排序使用同一批通过六维/六格门槛的股票；盈利优先不会改变硬门槛。",
+    )
+    sort_mode = "profitability" if sort_label.startswith("盈利") else "speculation"
     risk_label = st.sidebar.selectbox(
         "宏观情景假设",
         options=["自动识别（推荐）", "偏进攻", "偏防御"],
@@ -928,7 +1048,7 @@ def sidebar(settings: ScanSettings) -> tuple[ScanSettings, int, int, bool]:
     new_settings = replace(
         settings, n_potential=int(n_pot), n_active=int(n_act),
         scan_potential=int(dep), scan_active=int(dep),
-        boards=tuple(boards), risk_mode=risk_mode,
+        boards=tuple(boards), risk_mode=risk_mode, sort_mode=sort_mode,
         min_float_mcap_yi=float(min_cap), max_float_mcap_yi=float(max_cap),
         min_amount20_yi=float(min_amt), exclude_loss=bool(excl_loss),
     )
@@ -954,7 +1074,7 @@ def sidebar(settings: ScanSettings) -> tuple[ScanSettings, int, int, bool]:
         "“投机”意味着高波动、高回撤与流动性风险，任何排名都可能失效。</div>",
         unsafe_allow_html=True,
     )
-    st.sidebar.caption("模型 2026.10-r2 · 数据：东方财富 / 腾讯 / 新浪")
+    st.sidebar.caption("模型 2026.10-r3 · 数据：东方财富 / 腾讯 / 新浪")
     return new_settings, int(n_pot), int(n_act), bool(excl_loss)
 
 
@@ -966,7 +1086,7 @@ def main() -> None:
 <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; flex-wrap:wrap;">
   <div>
     <h1>📡 A股双轨投机雷达</h1>
-    <div class="hero-sub">全 A 股扫描 · 潜在投机 / 活跃投机双模型 · 严格使用信号日及之前数据</div>
+    <div class="hero-sub">全 A 股扫描 · 潜在/活跃双模型 · 盈利排序 · 三浪结构 · 严格使用信号日及之前数据</div>
   </div>
 </div>
         """,
@@ -1064,6 +1184,8 @@ def main() -> None:
   <span class="badge gray">数据 · {esc(mode_label)}</span>
   <span class="badge">市场 · {esc(macro.get('label'))}（{num(macro.get('risk_appetite'),0)}）</span>
   <span class="badge">情绪 · {esc((meta.get('sentiment') or {}).get('label','未知'))}</span>
+  <span class="badge gray">排序 · {'盈利优先' if meta.get('sort_mode') == 'profitability' else '投机分优先'}</span>
+  <span class="badge">三浪 · 典型 {int(meta.get('wave_typical', 0))} / 启动前 {int(meta.get('wave_pre', 0))}</span>
   <span class="badge green">全市场 {int(meta.get('universe_total',0)):,} 只 · 基础域 {int(meta.get('eligible_base',0)):,}</span>
   <span class="badge gray">耗时 {num(meta.get('elapsed_sec'),1)}s · 模型 {esc(meta.get('model_version'))}</span>
 </div>
@@ -1080,8 +1202,8 @@ def main() -> None:
         st.error("两个模型都没有输出，请放宽高级筛选或检查数据日期。")
         st.stop()
 
-    tab_overview, tab_pot, tab_act, tab_detail, tab_macro = st.tabs(
-        ["总览", "潜在投机榜", "活跃投机榜", "个股详情", "宏观 / 方法"]
+    tab_overview, tab_pot, tab_act, tab_wave, tab_detail, tab_macro = st.tabs(
+        ["总览", "潜在投机榜", "活跃投机榜", "三浪雷达", "个股详情", "宏观 / 方法"]
     )
 
     with tab_overview:
@@ -1132,7 +1254,8 @@ def main() -> None:
                 table_view(pot, n_pot), hide_index=True, width="stretch",
                 height=min(620, 42 + 36 * min(n_pot, len(pot))),
                 column_config={
-                    "综合分": st.column_config.ProgressColumn("综合分", min_value=0, max_value=100, format="%.1f"),
+                    "投机分": st.column_config.ProgressColumn("投机分", min_value=0, max_value=100, format="%.1f"),
+                    "盈利分": st.column_config.NumberColumn("盈利分", format="%.0f"),
                     "稳健度": st.column_config.NumberColumn("稳健度", format="%.0f"),
                 },
             )
@@ -1141,7 +1264,7 @@ def main() -> None:
                 file_name=f"potential_rank_{meta.get('signal_date')}.csv", mime="text/csv",
                 key="dl_pot",
             )
-            st.caption("综合分只在同一榜单内相对比较，不同模型之间不可直接比较。")
+            st.caption("盈利分是当前排序；投机分只在同一榜单内相对比较，不同模型之间不可直接比较。")
 
     with tab_act:
         st.markdown("### 活跃投机榜")
@@ -1165,7 +1288,8 @@ def main() -> None:
                 table_view(act, n_act), hide_index=True, width="stretch",
                 height=min(620, 42 + 36 * min(n_act, len(act))),
                 column_config={
-                    "综合分": st.column_config.ProgressColumn("综合分", min_value=0, max_value=100, format="%.1f"),
+                    "投机分": st.column_config.ProgressColumn("投机分", min_value=0, max_value=100, format="%.1f"),
+                    "盈利分": st.column_config.NumberColumn("盈利分", format="%.0f"),
                     "稳健度": st.column_config.NumberColumn("稳健度", format="%.0f"),
                 },
             )
@@ -1174,7 +1298,10 @@ def main() -> None:
                 file_name=f"active_rank_{meta.get('signal_date')}.csv", mime="text/csv",
                 key="dl_act",
             )
-            st.caption("综合分只在同一榜单内相对比较，不同模型之间不可直接比较。")
+            st.caption("盈利分是当前排序；投机分只在同一榜单内相对比较，不同模型之间不可直接比较。")
+
+    with tab_wave:
+        render_wave(result)
 
     with tab_detail:
         render_detail(result, n_pot, n_act)

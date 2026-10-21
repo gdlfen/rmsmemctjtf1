@@ -11,6 +11,7 @@ from spec_radar import learning
 from spec_radar.altdata import AnnBundle, apply_announcements
 from spec_radar.forecast import load_params, predict_forecasts
 from spec_radar.framework import add_active_framework, add_potential_framework, add_trade_levels
+from spec_radar.wave import detect_wave
 
 
 def _base_row(**overrides):
@@ -64,6 +65,28 @@ def test_forecast_predictions_are_bounded():
         assert out.iloc[0]["target_high"] >= 10.0
         assert out.iloc[0]["target_high_bull"] >= out.iloc[0]["target_high"]
         assert out.iloc[0]["launch_window"] in {"1-3", "4-10", "11-20", "20+"}
+
+
+def test_wave_detection_synthetic():
+    n = 110
+    close = np.concatenate([
+        np.linspace(10.8, 10.0, 8),
+        np.linspace(10.0, 13.0, 24),
+        np.linspace(13.0, 11.5, 22),
+        np.linspace(11.5, 13.3, 24),
+        np.linspace(13.3, 13.8, n - 78),
+    ])
+    df = pd.DataFrame({
+        "date": pd.bdate_range("2026-01-01", periods=n),
+        "open": close * 0.999, "high": close * 1.02,
+        "low": close * 0.98, "close": close,
+        "volume": np.linspace(1.0e6, 1.4e6, n),
+    })
+    out = detect_wave(df)
+    assert out["wave_stage"] != "非典型"
+    assert out["wave_pattern_score"] > 0
+    assert out["wave_target2"] >= out["wave_target1"]
+    assert out["wave_stop"] < out["wave_buy_low"]
 
 
 def test_trade_levels_are_ordered():

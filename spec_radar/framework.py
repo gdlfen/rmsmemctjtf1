@@ -245,10 +245,13 @@ def build_daily_screens(features: pd.DataFrame, snapshot: pd.DataFrame, scored: 
         return {}
     df = features.copy()
     snap = snapshot.set_index("code")
+    if "code" in df.columns:
+        df["code"] = df["code"].astype(str).str.zfill(6)
+    else:
+        df["code"] = df.index.astype(str).str.zfill(6)
     for col in ("name", "industry", "float_mcap_yi", "net_profit"):
         if col not in df:
-            df[col] = snap[col].reindex(df.index).values
-    df["code"] = df.index.astype(str).str.zfill(6)
+            df[col] = snap[col].reindex(df["code"]).values
     common = (~snap["is_st"].reindex(df["code"]).fillna(False).values) & (df["avg_amount20_yi"].fillna(0) >= 0.45)
     first_flag = df.get("first_board", pd.Series(0.0, index=df.index)).fillna(0)
     consecutive_flag = df.get("consecutive_limit_up", pd.Series(0.0, index=df.index)).fillna(0)
