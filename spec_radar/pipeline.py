@@ -394,13 +394,46 @@ def run_scan(
         potential = add_trade_levels(potential, "potential")
     if not active.empty:
         active = add_trade_levels(active, "active")
-    # 盈利能力排序与投机综合分排序分开；默认按用户要求“盈利优先”。
+    # “盈利能力”在用户语境里是未来股价可能拉升的总幅度，不是公司财务盈利。
+    # 因此默认按预测目标空间排序；财务质量只作为参考列，不再作为默认排序键。
+    def _add_rally_space(frame: pd.DataFrame) -> pd.DataFrame:
+        if frame.empty:
+            return frame
+        out = frame.copy()
+        cur = pd.to_numeric(
+            out.get("current_price", out.get("close_signal")), errors="coerce"
+        ).replace(0, np.nan)
+        cur = cur.fillna(pd.to_numeric(out.get("close_signal"), errors="coerce"))
+        base = (pd.to_numeric(out.get("target_high"), errors="coerce") / cur - 1.0).fillna(0).clip(lower=0)
+        bull = (pd.to_numeric(out.get("target_high_bull"), errors="coerce") / cur - 1.0).fillna(0).clip(lower=0)
+        if "wave_target2" in out:
+            wave_bull = (pd.to_numeric(out["wave_target2"], errors="coerce") / cur - 1.0).fillna(0).clip(lower=0)
+            bull = np.maximum(bull, wave_bull)
+        out["rally_space_pct"] = base
+        out["rally_max_pct"] = bull
+        out["rally_score"] = (base * 100.0).clip(0, 100)
+        return out
+
+    potential = _add_rally_space(potential)
+    active = _add_rally_space(active)
+
     def _sort_frame(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:
             return frame
         out = frame.copy()
         out["model_rank"] = out["rank"]
-        if settings.sort_mode == "profitability":
+        mode = "fundamental" if settings.sort_mode == "profitability" else settings.sort_mode
+        if mode == "rally":
+            out = out.sort_values(
+                ["rally_space_pct", "p_hit_10d", "rally_max_pct", "score", "confidence", "amount20_yi"],
+                ascending=[False, False, False, False, False, False],
+            ).reset_index(drop=True)
+        elif mode == "rally_max":
+            out = out.sort_values(
+                ["rally_max_pct", "p_hit_10d", "score", "confidence", "amount20_yi"],
+                ascending=[False, False, False, False, False],
+            ).reset_index(drop=True)
+        elif mode == "fundamental":
             out = out.sort_values(
                 ["profitability_score", "score", "confidence", "amount20_yi"],
                 ascending=[False, False, False, False],
@@ -435,11 +468,11 @@ def run_scan(
                 0.32 * _numcol("wave_pattern_score")
                 + 0.20 * _numcol("wave_launch_prob") * 100
                 + 0.14 * _numcol("wave_upside_bull").clip(0, 0.6) * 100
-                + 0.10 * _numcol("profitability_score")
+                + 0.10 * _numcol("rally_space_pct").clip(0, 1.0) * 100
                 + 0.09 * _numcol("theme_fit") * 100
                 + 0.15 * _numcol("score")
             ).clip(0, 100)
-            wave_all = wave_all.sort_values(["wave_composite", "profitability_score"], ascending=[False, False])
+            wave_all = wave_all.sort_values(["wave_composite", "rally_max_pct"], ascending=[False, False])
             wave_all = wave_all.drop_duplicates("code", keep="first").reset_index(drop=True)
             typical = wave_all[
                 wave_all["wave_stage_code"].isin(["early3", "main3"])

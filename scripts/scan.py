@@ -32,8 +32,8 @@ def main() -> int:
     parser.add_argument("--n-active", type=int, default=None)
     parser.add_argument("--depth", type=int, default=300, choices=[200, 300, 500, 650], help="每个模型的粗筛池大小")
     parser.add_argument("--risk", default="auto", choices=["auto", "offensive", "defensive"])
-    parser.add_argument("--sort", default="profitability", choices=["profitability", "speculation"],
-                        help="榜单排序：盈利能力优先或投机综合分优先")
+    parser.add_argument("--sort", default="rally", choices=["rally", "rally_max", "fundamental", "speculation", "profitability"],
+                        help="榜单排序：预期拉升空间/财务质量/投机综合分")
     parser.add_argument("--as-of", default="", help="YYYY-MM-DD，默认最近已收盘交易日")
     parser.add_argument("--outdir", default=str(ROOT / "reports"))
     parser.add_argument("--no-cache", action="store_true", help="强制绕过磁盘缓存重新抓取")

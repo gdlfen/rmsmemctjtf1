@@ -55,7 +55,7 @@ class ScanSettings:
     min_amount20_yi: float = 0.0
     exclude_loss: bool = False
     risk_mode: str = "auto"  # auto / offensive / defensive
-    sort_mode: str = "profitability"  # profitability / speculation
+    sort_mode: str = "rally"  # rally / fundamental / speculation
     as_of: str = ""  # YYYY-MM-DD；留空表示自动取最近已收盘交易日
     lookback_bars: int = 320
 
@@ -70,7 +70,7 @@ class ScanSettings:
             raise ValueError("活跃榜扫描深度必须在 100..1200")
         if self.risk_mode not in {"auto", "offensive", "defensive"}:
             raise ValueError("risk_mode 非法")
-        if self.sort_mode not in {"profitability", "speculation"}:
+        if self.sort_mode not in {"rally", "rally_max", "fundamental", "speculation", "profitability"}:
             raise ValueError("sort_mode 非法")
 
     def key(self) -> Dict[str, Any]:

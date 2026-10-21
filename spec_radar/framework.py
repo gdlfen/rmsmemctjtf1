@@ -173,6 +173,9 @@ def add_trade_levels(df: pd.DataFrame, model_key: str) -> pd.DataFrame:
         if not np.isfinite(close) or close <= 0:
             rows.append({})
             continue
+        now = _s(row, "current_price", close)
+        if not np.isfinite(now) or now <= 0:
+            now = close
         atr = _s(row, "atr14", 0.03) * close
         ma5 = _s(row, "ma5", close)
         ma10 = _s(row, "ma10", close)
@@ -190,23 +193,28 @@ def add_trade_levels(df: pd.DataFrame, model_key: str) -> pd.DataFrame:
             buy_high = min(close * 1.015, ma20 * 1.035)
             if buy_high <= buy_low:
                 buy_high = buy_low * 1.02
+            # 支撑位不应跑到现价远上方；否则“买点”变成追高。
+            buy_high = min(buy_high, now * 1.01)
+            buy_low = min(buy_low, buy_high * 0.99)
             best_buy = (buy_low + buy_high) / 2
-            stop = min(buy_low * 0.97, ma60 * 0.985) if np.isfinite(ma60) else buy_low * 0.97
+            stop = min(buy_low * 0.97, ma60 * 0.985) if np.isfinite(ma60) and ma60 < buy_low else buy_low * 0.97
             trigger = "回踩 MA20/60 或 60 日低点缩量企稳；或放量突破 20 日高点后回踩确认"
-            sell_low = max(t_low, high60 * 0.98, best_buy * 1.06)
+            sell_low = max(t_low, high60 * 0.98, best_buy * 1.06, now * 1.03)
             sell_high = max(t_bull, t_mid, sell_low * 1.02)
             note = "潜在票先等回踩/突破确认，不在放量长上影当天追；破位不补仓。"
         else:
             buy_low = min(ma10, close * 0.985) * 0.995 if np.isfinite(ma10) else close * 0.96
             buy_high = max(ma10 * 1.01, buy_low * 1.015) if np.isfinite(ma10) else close * 0.99
-            if buy_high >= close:
-                buy_high = close * 0.995
+            if buy_high >= now:
+                buy_high = now * 0.995
             if buy_high <= buy_low:
                 buy_high = buy_low * 1.01
+            buy_high = min(buy_high, now * 1.005)
+            buy_low = min(buy_low, buy_high * 0.99)
             best_buy = (buy_low + buy_high) / 2
             stop = min(ma20 * 0.97, buy_low * 0.94, close * 0.92) if np.isfinite(ma20) else buy_low * 0.94
             trigger = "回踩 MA10 不破且缩量，或突破前高后 1–2 日不破；不追 5 日加速末端"
-            sell_low = max(t_low, high60 * 0.99, best_buy * 1.06)
+            sell_low = max(t_low, high60 * 0.99, best_buy * 1.06, now * 1.03)
             sell_high = max(t_bull, t_mid, sell_low * 1.02)
             note = "活跃票按接力/波段处理，跌破 MA20 或放量长阴先离场。"
         stop = min(stop, best_buy * 0.99) if stop < best_buy else best_buy * 0.92
