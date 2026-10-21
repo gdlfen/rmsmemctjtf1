@@ -779,7 +779,7 @@ def render_wave(result: dict) -> None:
         st.dataframe(t, width="stretch", hide_index=True, height=380)
 
     st.markdown("#### 潜在第一浪 · 启动前观察")
-    st.caption("平台收敛、低点抬高、量能萎缩，尚未有效突破平台上沿；第一浪为独立结构，不强制六维/六格，仍需公告/风险人工核对。突破/回踩确认才触发，不是现价买入指令。")
+    st.caption("平台收敛、低点抬高、量能萎缩，尚未有效突破平台上沿；第一浪候选先通过六维/六格，再做公告/减持/立案等红线核查；通过后仍需人工复核实。突破/回踩确认才触发，不是现价买入指令。")
     ft = _ftable(first) if first is not None and not first.empty else pd.DataFrame()
     if ft.empty:
         st.info("暂无处于第一浪启动前的候选。")

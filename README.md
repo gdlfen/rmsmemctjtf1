@@ -253,7 +253,7 @@ AUC 0.58–0.66 只代表**略优于随机**；不能把 `p_hit_10d=60%` 理解�
 
 输出字段：`first_wave_stage`、`first_wave_position`、`first_wave_launch_prob/window/days`、`first_wave_target1/2`、`first_wave_buy_low/high`、`first_wave_sell_low/high`、`first_wave_stop`、`first_wave_composite`。
 
-第一浪候选来自双模型**合格全集**，不强制通过六维/六格门槛，因此与三浪列表可能重叠；这代表不同级别的结构，不应把同一只股票重复当作两个独立机会。
+第一浪候选先经过六维/六格（潜在来源六维≥9；活跃来源六格≥5且安全），再做公告/减持/立案等红线核查；它与三浪列表仍可能重叠，代表不同级别结构，不应把同一只股票重复当作两个独立机会。
 
 ### 3.9 三浪雷达（典型三浪 / 第三浪启动前）
 
@@ -305,6 +305,36 @@ AUC 0.58–0.66 只代表**略优于随机**；不能把 `p_hit_10d=60%` 理解�
 
 
 ---
+
+## 3.11 三浪 / 第一浪历史回测
+
+运行：
+
+```bash
+python scripts/run_wave_backtest.py
+```
+
+结果写入 `data/wave_backtest.json`，并在界面“宏观 / 方法”页展示。口径：
+
+- 灾备包 840 只当前存续股票，2025-11 至 2026-09，43 个截面；
+- 每 5 个交易日一个截面，未来 10 个交易日；
+- 次日开盘入场，先触止损按止损、触目标按目标，否则第 10 日收盘退出；
+- 单边成本 0.1%；
+- 第一浪“六维代理”只使用历史价量、市值、ST 状态；历史公告/减持/立案无法完整点时重建，回测未包含，实盘第一浪候选会再核查。
+
+| 策略 | 交易数 | 胜率 | 平均收益 | 平均超额 | 目标触达 | 止损率 |
+|---|---:|---:|---:|---:|---:|---:|
+| 三浪·典型 | 385 | 58.4% | +0.76% | -1.30% | 47.5% | 15.3% |
+| 三浪·启动前 | 403 | 48.4% | +1.52% | -0.44% | 20.1% | 27.8% |
+| 第一浪·六维代理通过 | 395 | 52.2% | +1.81% | -0.20% | 10.6% | 3.3% |
+| 第一浪·未过六维代理 | 235 | 53.6% | +0.76% | -1.70% | 3.8% | 7.7% |
+
+**结论必须说清楚：**
+
+- 四组策略在样本内都没有稳定跑赢等权股票池，平均超额为负；
+- 第一浪加六维/六格代理后，平均收益和超额好于未过滤组，说明门槛有筛选价值，但仍不足以保证未来有效；
+- 典型三浪胜率较高但平均收益较低，目标触达率也不能转化为稳定超额；
+- 股票池来自当前存续股票，存在幸存者偏差；历史公告/财务/主题不是严格点时数据，不能把结果当作实盘承诺。
 
 ## 4. 数据与“不用未来函数”
 
@@ -378,6 +408,9 @@ python scripts/build_bootstrap.py --depth 420
 # 价量核心子模型滚动验证
 python scripts/run_validation.py
 
+# 三浪 / 第一浪完整事件回测
+python scripts/run_wave_backtest.py
+
 # 指定排序方式（默认 rally：预期拉升空间）
 python scripts/scan.py --n 12 --sort rally  # 或 --sort rally_max
 
@@ -407,7 +440,8 @@ ashare-spec-radar/
 │  ├─ altdata.py               # 涨停池/龙虎榜/公告红线
 │  ├─ scoring.py               # 双模型、风险罚分、稳健度
 │  ├─ framework.py             # 六维/六格、每日筛子、交易计划
-│  ├─ wave.py                  # 三浪结构识别与目标/买卖点
+│  ├─ wave.py                  # 三浪/第一浪结构识别与目标/买卖点
+│  ├─ wave_backtest.py         # 三浪/第一浪事件回测
 │  ├─ forecast.py              # 概率、目标价、起爆窗口训练/预测
 │  ├─ learning.py              # 自我学习账本与概率校准
 │  ├─ pipeline.py              # 扫描编排
@@ -417,10 +451,12 @@ ashare-spec-radar/
 │  ├─ scan.py                  # 命令行扫描
 │  ├─ build_bootstrap.py       # 生成灾备包
 │  ├─ run_validation.py
-│  └─ train_forecast.py        # 概率/目标价/起爆窗口训练
+│  ├─ train_forecast.py        # 概率/目标价/起爆窗口训练
+│  └─ run_wave_backtest.py     # 三浪/第一浪历史回测
 ├─ data/
 │  ├─ bootstrap/               # 离线灾备数据（建议随仓库提交）
 │  ├─ learning/forecast_params.json
+│  ├─ wave_backtest.json       # 三浪/第一浪回测结果
 │  └─ validation.json          # 验证结果
 ├─ tests/                      # pytest
 └─ docs/                       # 截图

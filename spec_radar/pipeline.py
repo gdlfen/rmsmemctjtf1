@@ -304,9 +304,10 @@ def run_scan(
     _report(progress, "评分", 0.90, "运行潜在投机与活跃投机双模型")
     potential = score_model(features, snapshot, model_cfg, "potential", settings, macro, signal_ts)
     active = score_model(features, snapshot, model_cfg, "active", settings, macro, signal_ts)
-    # 第一浪候选不强制通过三浪/六维/六格门槛，保留评分全集用于独立筛选。
-    potential_all = potential.copy()
-    active_all = active.copy()
+    # 第一浪候选先保留评分全集，再用真实的六维/六格框架做门槛；
+    # 三浪列表仍使用后面的严格过滤结果。
+    potential_all = add_potential_framework(potential.copy())
+    active_all = add_active_framework(active.copy())
     if potential.empty:
         warnings.append("潜在投机模型没有符合条件的股票：可放宽板块/市值筛选或增大扫描深度")
     if active.empty:
@@ -327,6 +328,17 @@ def run_scan(
                 if not frame.empty:
                     n = min(len(frame), max(40, int(settings.n_potential)))
                     top_codes.update(frame.head(n)["code"].astype(str).tolist())
+            # 第一浪候选也做公告覆盖，避免只在三浪榜里查公告。
+            if not potential_all.empty and "first_wave_stage_code" in potential_all:
+                first_codes = potential_all[
+                    potential_all["first_wave_stage_code"].isin(["pre1", "pre1_break"])
+                ]["code"].astype(str).head(40)
+                top_codes.update(first_codes.tolist())
+            if not active_all.empty and "first_wave_stage_code" in active_all:
+                first_codes = active_all[
+                    active_all["first_wave_stage_code"].isin(["pre1", "pre1_break"])
+                ]["code"].astype(str).head(40)
+                top_codes.update(first_codes.tolist())
             if top_codes:
                 ann_bundle = alt.get_announcements(top_codes, signal_date)
                 if ann_bundle.warning:
@@ -542,6 +554,16 @@ def run_scan(
                     & (pd.to_numeric(all_first["first_wave_launch_prob"], errors="coerce").fillna(0) >= 0.30)
                 ].copy()
                 if not all_first.empty:
+                    # 真实六维/六格：潜在来源要求六维≥9；活跃来源要求六格≥5且安全。
+                    is_pot = all_first["wave_model"].eq("潜在")
+                    pot_ok = pd.to_numeric(all_first.get("setup_score"), errors="coerce").fillna(0) >= 9
+                    act_ok = (
+                        (pd.to_numeric(all_first.get("check_count"), errors="coerce").fillna(0) >= 5)
+                        & all_first.get("check_safety", pd.Series(False, index=all_first.index)).fillna(False).astype(bool)
+                    )
+                    all_first["first_six_ok"] = np.where(is_pot, pot_ok, act_ok)
+                    all_first = all_first[all_first["first_six_ok"]].copy()
+                if not all_first.empty:
                     def _fcol(name: str, default: float = 0.0) -> pd.Series:
                         if name not in all_first:
                             return pd.Series(default, index=all_first.index, dtype=float)
@@ -558,6 +580,10 @@ def run_scan(
                     first = all_first[all_first["first_wave_composite"] >= 45].copy()
                     first = first.sort_values(["first_wave_composite", "first_wave_upside_bull"], ascending=[False, False])
                     first = first.drop_duplicates("code", keep="first").reset_index(drop=True)
+                    # 公告红线（澄清/减持/立案/问询等）对第一浪同样适用。
+                    if not first.empty and not ann_bundle.flags.empty:
+                        first, _ = apply_announcements(first, ann_bundle)
+                        first = first[~first.get("ann_hard_excluded", False)].copy()
                     first["first_wave_rank"] = np.arange(1, len(first) + 1)
             wave_lists = {"typical": typical, "pre": pre, "first": first}
             composite_map = wave_all[["code", "wave_composite"]].drop_duplicates("code")
