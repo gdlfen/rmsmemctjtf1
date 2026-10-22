@@ -45,6 +45,23 @@ def _pivots(df: pd.DataFrame, window: int = 4, min_move: float = 0.055) -> List[
     return out
 
 
+def _macd_flags(close: pd.Series) -> Dict[str, Any]:
+    x = pd.to_numeric(close, errors="coerce").dropna()
+    if len(x) < 35:
+        return {"gold": False, "above0": False, "gold_count20": 0, "hist": np.nan}
+    dif = x.ewm(span=12, adjust=False).mean() - x.ewm(span=26, adjust=False).mean()
+    dea = dif.ewm(span=9, adjust=False).mean()
+    hist = dif - dea
+    cross = (dif > dea) & (dif.shift(1) <= dea.shift(1))
+    recent = cross.tail(20)
+    return {
+        "gold": bool(recent.iloc[-1]) if len(recent) else False,
+        "above0": bool(dif.iloc[-1] > 0 and dea.iloc[-1] > 0),
+        "gold_count20": int(recent.sum()),
+        "hist": float(hist.iloc[-1]),
+    }
+
+
 def _atr(df: pd.DataFrame, n: int = 14) -> float:
     high = df["high"].astype(float)
     low = df["low"].astype(float)
@@ -61,12 +78,16 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
         "wave_pattern_score": 0.0, "wave_stage": "非典型", "wave_stage_code": "none",
         "wave_position": np.nan, "wave1_gain": np.nan, "wave2_retrace": np.nan,
         "wave_launch_prob": np.nan, "wave_launch_window": "—", "wave_launch_days": np.nan,
-        "wave_target1": np.nan, "wave_target2": np.nan, "wave_target3": np.nan,
+        "wave_target1": np.nan, "wave_target2": np.nan, "wave_target3": np.nan, "wave_target4": np.nan,
         "wave_upside_base": np.nan, "wave_upside_bull": np.nan,
         "wave_buy_low": np.nan, "wave_buy_high": np.nan, "wave_stop": np.nan,
         "wave_sell_low": np.nan, "wave_sell_high": np.nan,
         "wave_risk_reward": np.nan, "wave_profit_score": 0.0, "wave_note": "K线不足或未形成典型 1-2 结构",
         "wave1_start": np.nan, "wave1_high": np.nan, "wave2_low": np.nan,
+        "wave3_shape": "非典型", "wave3_shape_code": "none", "wave3_shape_score": 0.0,
+        "wave3_valid": False, "wave3_confirm": False, "wave3_breakout_days": 0,
+        "wave3_gap_count": 0, "wave3_macd_gold": False, "wave3_weekly_gold": False,
+        "wave3_volume_ratio": np.nan, "wave3_factor_score": 0.0, "wave3_checklist": "",
     }
     if df is None or len(df) < 70:
         return empty
@@ -133,6 +154,82 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
         ma60 = float(pd.to_numeric(d["close"], errors="coerce").rolling(60).mean().iloc[-1])
         volr = float(pd.to_numeric(d["volume"], errors="coerce").tail(5).mean() /
                      max(pd.to_numeric(d["volume"], errors="coerce").iloc[-25:-5].mean(), 1e-9))
+        ma10 = float(pd.to_numeric(d["close"], errors="coerce").rolling(10).mean().iloc[-1])
+        # 三浪确认：突破浪1高点后至少连续 2 日站稳；量能同步放大更可信。
+        max_run = 0
+        run = 0
+        for i in range(p1["pos"] + 1, len(d)):
+            if float(d["close"].iloc[i]) >= p1v * 1.005:
+                run += 1
+                max_run = max(max_run, run)
+            else:
+                run = 0
+        breakout_days = int(max_run)
+        max_high_since = float(pd.to_numeric(d.loc[p1["pos"]:, "high"], errors="coerce").max())
+        failed = max_high_since >= p1v * 1.01 and (current < p1v * 0.995 or current < p2v * 0.97)
+        if failed:
+            stage, code = "失败三浪", "failed3"
+        # 未回补跳空：只统计突破浪1高点之后形成的向上缺口。
+        gap_count = 0
+        for i in range(p1["pos"] + 1, len(d)):
+            prev_high = float(d["high"].iloc[i - 1])
+            if float(d["low"].iloc[i]) > prev_high * 1.003:
+                if not any(float(d["low"].iloc[j]) <= prev_high for j in range(i + 1, len(d))):
+                    gap_count += 1
+        gap_count = int(min(gap_count, 5))
+        daily_macd = _macd_flags(pd.Series(d["close"]))
+        weekly_macd = {"gold": False, "above0": False, "gold_count20": 0}
+        try:
+            wd = d.copy()
+            wd["date"] = pd.to_datetime(wd["date"])
+            weekly = wd.set_index("date").resample("W-FRI").agg({"close": "last"}).dropna()
+            weekly_macd = _macd_flags(weekly["close"])
+        except Exception:
+            pass
+        wave3_vol = float(pd.to_numeric(d.loc[p1["pos"]:, "volume"], errors="coerce").mean() /
+                          max(vol1, 1e-9))
+        recent5 = float(current / close[-6] - 1.0) if len(close) >= 6 else 0.0
+        recent10 = float(current / close[-11] - 1.0) if len(close) >= 11 else 0.0
+        pct_days = pd.to_numeric(d["close"], errors="coerce").pct_change() * 100.0
+        max_day = float(pct_days.tail(20).max() / 100.0) if len(pct_days) else 0.0
+        channel_days = 0
+        if len(d) >= 15 and np.isfinite(ma10):
+            channel_days = int((pd.to_numeric(d["close"], errors="coerce").tail(15) >= ma10 * 0.98).sum())
+        channel = channel_days >= 11 and current >= p1v * 0.98
+        length3 = max(max_high_since - p2v, 0.0)
+        wave3_not_shortest = (length3 >= length * 0.70) if code in ("early3", "main3", "late3", "end3") else True
+        wave3_valid = bool(p2v > p0v * 1.005 and wave3_not_shortest and not failed)
+        confirmed = bool(code != "pre3" and breakout_days >= 2 and (wave3_vol >= 1.05 or current >= p1v * 1.03))
+        if failed:
+            shape, shape_code, shape_score = "失败三浪", "failed3", 10.0
+        elif code == "pre3":
+            shape, shape_code, shape_score = "启动前待确认", "pending", 45.0
+        elif max_high_since >= p1v * 1.005 and current >= p1v * 0.995 and breakout_days < 2:
+            shape, shape_code, shape_score = "假突破待确认", "fake_break", 30.0
+        elif gap_count >= 1:
+            shape, shape_code, shape_score = "缺口驱动型", "gap", 88.0
+        elif max_day >= 0.07 or recent5 >= 0.18:
+            shape, shape_code, shape_score = "单浪劲升型", "impulse", 86.0
+        elif channel:
+            shape, shape_code, shape_score = "通道上行型", "channel", 78.0
+        elif code in ("early3", "main3"):
+            shape, shape_code, shape_score = "标准延长浪", "standard", 72.0
+        elif code == "late3":
+            shape, shape_code, shape_score = "三浪中后段", "late", 50.0
+        elif code == "end3":
+            shape, shape_code, shape_score = "三浪末端", "end", 35.0
+        else:
+            shape, shape_code, shape_score = "非典型", "none", 20.0
+        checklist = "；".join([
+            ("浪2不破浪1起点" if p2v > p0v * 1.005 else "浪2破浪1起点"),
+            ("尚未突破浪1高点" if code == "pre3" else (f"突破后站稳{breakout_days}日" if breakout_days >= 2 else "突破未满2日")),
+            (f"三浪量能{wave3_vol:.2f}倍" if np.isfinite(wave3_vol) else "量能缺失"),
+            ("日线MACD金叉" if daily_macd["gold"] else ("日线MACD零轴上" if daily_macd["above0"] else "日线MACD未确认")),
+            ("周线MACD零轴上/金叉" if (weekly_macd["above0"] or weekly_macd["gold"]) else "周线MACD未确认"),
+            (f"未回补缺口{gap_count}个" if gap_count else "无未回补缺口"),
+            ("三浪不最短" if wave3_not_shortest else "三浪长度不足"),
+            "浪4重叠未验证",
+        ])
         pattern = 45.0
         pattern += 13.0 if 0.12 <= gain1 <= 0.60 else 5.0
         pattern += 18.0 if 0.28 <= retrace <= 0.618 else 8.0
@@ -141,7 +238,23 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
         pattern += 5.0 if np.isfinite(ma60) and p2v >= ma60 * 0.96 else 0.0
         pattern += 4.0 if np.isfinite(ma20) and current >= ma20 else 0.0
         pattern += 4.0 if 8 <= p2["pos"] - p1["pos"] <= 65 else 0.0
+        pattern += 5.0 if confirmed else 0.0
+        pattern += 4.0 if gap_count else 0.0
+        if not wave3_valid:
+            pattern -= 18.0
+        if failed:
+            pattern = min(pattern, 25.0)
         pattern = float(np.clip(pattern, 0, 100))
+        factor_score = (
+            0.30 * pattern
+            + 0.18 * shape_score
+            + 0.14 * (100 if confirmed else (45 if code == "pre3" else 20))
+            + 0.12 * (100 if wave3_valid else 10)
+            + 0.10 * (100 if daily_macd["gold"] or daily_macd["above0"] else 30)
+            + 0.10 * (100 if weekly_macd["gold"] or weekly_macd["above0"] else 30)
+            + 0.06 * min(wave3_vol * 40, 100)
+        )
+        factor_score = float(np.clip(factor_score, 0, 100))
         # 启动概率：结构 + 当前位置 + 量能，仅作启发式概率，不是训练模型。
         launch_prob = 0.26 + 0.0038 * pattern + 0.16 * np.clip(current / p1v - 0.9, 0, 0.2) + 0.06 * np.clip(volr - 1, 0, 1.5)
         launch_prob = float(np.clip(launch_prob, 0.10, 0.88))
@@ -155,12 +268,14 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
         t1 = p2v + length * 1.0
         t2 = p2v + length * 1.618
         t3 = p2v + length * 2.618
+        t4 = p2v + length * 4.236
         # 已经越过旧目标时，展示“上方下一目标”，避免把低于现价的价位当卖点。
         if current >= t1 * 0.98:
             t1 = max(t1, current * 1.05)
         if current >= t2 * 0.98:
             t2 = max(t2, current * 1.08)
         t3 = max(t3, t2 * 1.05)
+        t4 = max(t4, t3 * 1.02)
         upside_base = max(t1 / current - 1.0, 0.0)
         upside_bull = max(t2 / current - 1.0, 0.0)
         if code == "pre3":
@@ -215,6 +330,7 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
             "wave_target1": round(t1, 2),
             "wave_target2": round(t2, 2),
             "wave_target3": round(t3, 2),
+            "wave_target4": round(t4, 2),
             "wave_upside_base": round(upside_base, 4),
             "wave_upside_bull": round(upside_bull, 4),
             "wave_buy_low": round(buy_low, 2),
@@ -228,6 +344,20 @@ def detect_wave(df: pd.DataFrame) -> Dict[str, Any]:
             "wave1_start": round(p0v, 2),
             "wave1_high": round(p1v, 2),
             "wave2_low": round(p2v, 2),
+            "wave3_shape": shape,
+            "wave3_shape_code": shape_code,
+            "wave3_shape_score": round(shape_score, 1),
+            "wave3_valid": bool(wave3_valid),
+            "wave3_confirm": bool(confirmed),
+            "wave3_breakout_days": int(breakout_days),
+            "wave3_gap_count": int(gap_count),
+            "wave3_macd_gold": bool(daily_macd["gold"]),
+            "wave3_macd_above0": bool(daily_macd["above0"]),
+            "wave3_weekly_gold": bool(weekly_macd["gold"] or weekly_macd["above0"]),
+            "wave3_volume_ratio": round(wave3_vol, 3) if np.isfinite(wave3_vol) else np.nan,
+            "wave3_factor_score": round(factor_score, 1),
+            "wave3_checklist": checklist,
+            "wave3_failure": bool(failed),
         }
         if best is None or candidate["wave_profit_score"] > best["wave_profit_score"]:
             best = candidate

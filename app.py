@@ -65,6 +65,8 @@ def inject_css() -> None:
   h1 {font-size: clamp(1.55rem, 4vw, 2.25rem) !important; margin-bottom: .15rem !important;
       line-height: 1.35 !important; overflow: visible !important;}
   .hero-sub {color: #5b6472; font-size: .95rem; margin: .2rem 0 .8rem 0;}
+  h1 .dev-credit {font-size: .55em; color: #9ca3af; font-weight: 400; margin-left: .45rem;
+                  letter-spacing: 0; vertical-align: .12em;}
   .hero-badges {display:flex; flex-wrap:wrap; gap:.4rem; margin:.25rem 0 .8rem 0;}
   .badge {display:inline-flex; align-items:center; gap:.25rem; background:#fff7ed;
           border:1px solid #fed7aa; color:#9a3412; border-radius:999px;
@@ -317,8 +319,14 @@ def export_csv(df: pd.DataFrame, model_key: str) -> bytes:
         "best_sell_price": "最佳卖点参考", "risk_reward": "盈亏比", "buy_trigger": "买点触发条件",
         "ann_red_text": "公告红线", "ann_good_text": "公告催化",
         "wave_stage": "三浪阶段", "wave_pattern_score": "三浪结构分", "wave_position": "三浪位置",
+        "wave3_shape": "三浪形态", "wave3_shape_score": "形态分", "wave3_confirm": "三浪确认",
+        "wave3_breakout_days": "突破站稳天数", "wave3_gap_count": "未回补缺口",
+        "wave3_macd_gold": "日线MACD金叉", "wave3_weekly_gold": "周线MACD确认",
+        "wave3_volume_ratio": "三浪量能比", "wave3_factor_score": "三浪因子分",
+        "wave3_valid": "三浪有效", "wave3_checklist": "三浪校验",
         "wave_launch_prob": "三浪启动概率", "wave_launch_window": "三浪启动窗口",
         "wave_launch_days": "三浪预计日", "wave_target1": "三浪目标1", "wave_target2": "三浪目标2",
+        "wave_target3": "三浪目标3", "wave_target4": "三浪极限目标",
         "wave_upside_bull": "三浪上涨空间", "wave_buy_low": "三浪买点下沿", "wave_buy_high": "三浪买点上沿",
         "wave_sell_low": "三浪卖点下沿", "wave_sell_high": "三浪卖点上沿", "wave_stop": "三浪止损",
         "wave_risk_reward": "三浪盈亏比", "wave_composite": "三浪综合分", "wave_note": "三浪说明",
@@ -520,19 +528,36 @@ def render_detail(result: dict, n_potential: int, n_active: int) -> None:
         st.markdown(
             metric_grid([
                 ("三浪阶段", str(row.get("wave_stage")), f"结构分 {num(row.get('wave_pattern_score'),0)}"),
+                ("形态类型", str(row.get("wave3_shape") or "—"), f"形态分 {num(row.get('wave3_shape_score'),0)}"),
+                ("三浪确认", "已确认" if bool(row.get("wave3_confirm")) else "待确认", f"突破站稳 {num(row.get('wave3_breakout_days'),0)} 日"),
+                ("三浪因子", num(row.get("wave3_factor_score"), 0), f"缺口 {num(row.get('wave3_gap_count'),0)} 个 · 量能 {num(row.get('wave3_volume_ratio'),2)}"),
                 ("位置", num(row.get("wave_position"), 2), "0=一浪起点，1=一浪高点"),
                 ("一浪涨幅", pct(row.get("wave1_gain")), f"二浪回撤 {pct(row.get('wave2_retrace'))}"),
                 ("启动概率", pct(row.get("wave_launch_prob")), ("已启动" if str(row.get("wave_stage_code")) in {"early3","main3","late3","end3"} else f"窗口 {row.get('wave_launch_window','—')} / 第 {num(row.get('wave_launch_days'),0)} 日")),
                 ("三浪目标1", num(row.get("wave_target1"), 2), "一浪长度×1.0"),
                 ("三浪目标2", num(row.get("wave_target2"), 2), "一浪长度×1.618"),
+                ("三浪极限", num(row.get("wave_target4"), 2), "一浪长度×4.236"),
                 ("三浪买点", f"{num(row.get('wave_buy_low'),2)}–{num(row.get('wave_buy_high'),2)}", "突破/回踩确认"),
                 ("三浪卖点", f"{num(row.get('wave_sell_low'),2)}–{num(row.get('wave_sell_high'),2)}", "目标区分批"),
                 ("结构止损", num(row.get("wave_stop"), 2), "跌破二浪低点/结构失效"),
                 ("三浪综合", num(row.get("wave_composite"), 0), f"盈亏比 {num(row.get('wave_risk_reward'),2)}"),
+                ("政策/主题", pct(row.get("theme_fit")), "主题暴露"),
+                ("资金面", num(row.get("cmf20"), 2), f"OBV {num(row.get('obv_slope20'),2)}"),
+                ("基本面", num(row.get("profitability_score"), 0), str(row.get("profitability_label") or "—")),
+                ("情绪/过热", pct(row.get("ret20")), "风险罚分 " + num(row.get("penalty"), 1)),
             ]),
             unsafe_allow_html=True,
         )
         st.caption(str(row.get("wave_note") or ""))
+        st.caption("三浪校验：" + str(row.get("wave3_checklist") or "—"))
+        st.caption(
+            f"形态判定：{row.get('wave3_shape','—')}；"
+            f"突破站稳 {num(row.get('wave3_breakout_days'),0)} 日；"
+            f"未回补缺口 {num(row.get('wave3_gap_count'),0)} 个；"
+            f"三浪量能 {num(row.get('wave3_volume_ratio'),2)} 倍；"
+            f"日线MACD {'金叉' if row.get('wave3_macd_gold') else ('零轴上' if row.get('wave3_macd_above0') else '未确认')}；"
+            f"周线MACD {'确认' if row.get('wave3_weekly_gold') else '未确认'}。"
+        )
 
     if str(row.get("first_wave_stage") or "非典型") != "非典型" and pd.notna(row.get("first_wave_pattern_score")):
         st.markdown("#### 第一浪启动前 / 临界分析")
@@ -758,6 +783,8 @@ def render_wave(result: dict) -> None:
             "代码": d["code"],
             "名称": d["name"],
             "三浪阶段": d.get("wave_stage", "—"),
+            "形态类型": d.get("wave3_shape", "—"),
+            "因子分": d.get("wave3_factor_score", pd.Series(np.nan, index=d.index)).map(lambda x: num(x, 0)),
             "当前价": d["current_price"].map(lambda x: num(x, 2)) if "current_price" in d else "—",
             "目标1 / 目标2": target,
             "买卖/止损计划": plan,
@@ -860,7 +887,7 @@ def render_wave(result: dict) -> None:
     st.markdown(
         "<div class='warnbox'><b>三浪规则摘要：</b>一浪涨幅≥8%、二浪回撤 12%–82% 且不破一浪起点、"
         "二浪缩量、当前不破二浪低点；目标用一浪长度的 1.0/1.618/2.618 倍映射。"
-        "三浪综合分 = 结构 32% + 启动概率 20% + 三浪空间 14% + 预期拉升 10% + 主题 9% + 双模型分 15%。"
+        "三浪综合分 = 结构 26% + 三浪因子 8% + 启动概率 18% + 三浪空间 14% + 预期拉升 10% + 主题 9% + 双模型分 15%。"
         "“启动时间”按二浪时长、缩量和量能估计，仅为观察窗口。<br/>"
         "三浪失败/结构破坏：收盘跌破二浪低点；或突破后 3 日无法站稳一浪高点。"
         "第一浪：平台≤42%、低点抬高、量能萎缩，放量站上平台上沿才确认；跌破平台下沿失效。"
@@ -1246,9 +1273,9 @@ def sidebar(settings: ScanSettings) -> tuple[ScanSettings, int, int, bool]:
     dep = {"快速 · 200/200": 200, "标准 · 300/300": 300, "深度 · 500/500": 500}[depth]
     sort_label = st.sidebar.selectbox(
         "榜单排序",
-        options=["预期拉升基准优先（推荐）", "预期拉升上限优先", "财务质量优先", "投机综合分优先"],
-        index={"rally": 0, "rally_max": 1, "fundamental": 2, "profitability": 2}.get(settings.sort_mode, 0),
-        help="“预期拉升”=预测目标空间，不是公司财务盈利；基准用目标中枢，上限用目标上沿。",
+        options=["投机综合分优先（默认）", "预期拉升基准优先", "预期拉升上限优先", "财务质量优先"],
+        index={"speculation": 0, "rally": 1, "rally_max": 2, "fundamental": 3, "profitability": 3}.get(settings.sort_mode, 0),
+        help="默认按投机综合分；可切换为预期拉升基准/上限或财务质量。",
     )
     if "上限" in sort_label:
         sort_mode = "rally_max"
@@ -1316,8 +1343,8 @@ def main() -> None:
         """
 <div style="display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; flex-wrap:wrap;">
   <div>
-    <h1>📡 A股双轨投机雷达V3.0   田夫开发</h1>
-    <div class="hero-sub">全 A 股扫描 · 潜在/活跃双模型 · 预期拉升排序 · 三浪结构 · 严格使用信号日及之前数据</div>
+    <h1>📡 A股双轨投机雷达V3.0 <span class="dev-credit">田夫开发</span></h1>
+    <div class="hero-sub">全 A 股扫描 · 潜在/活跃双模型 · 投机综合分排序 · 三浪结构 · 严格使用信号日及之前数据</div>
   </div>
 </div>
         """,

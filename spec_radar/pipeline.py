@@ -489,8 +489,9 @@ def run_scan(
                 return pd.to_numeric(wave_all[name], errors="coerce").fillna(default)
 
             wave_all["wave_composite"] = (
-                0.32 * _numcol("wave_pattern_score")
-                + 0.20 * _numcol("wave_launch_prob") * 100
+                0.26 * _numcol("wave_pattern_score")
+                + 0.08 * _numcol("wave3_factor_score")
+                + 0.18 * _numcol("wave_launch_prob") * 100
                 + 0.14 * _numcol("wave_upside_bull").clip(0, 0.6) * 100
                 + 0.10 * _numcol("rally_space_pct").clip(0, 1.0) * 100
                 + 0.09 * _numcol("theme_fit") * 100
@@ -503,12 +504,15 @@ def run_scan(
                 & (_numcol("wave_pattern_score") >= 60)
                 & (_numcol("wave_upside_bull") >= 0.05)
                 & (wave_all["wave_composite"] >= 50)
+                & wave_all.get("wave3_valid", pd.Series(True, index=wave_all.index)).fillna(False).astype(bool)
+                & ~wave_all.get("wave3_shape_code", pd.Series("none", index=wave_all.index)).isin(["fake_break", "failed3"])
             ].copy()
             pre = wave_all[
                 wave_all["wave_stage_code"].eq("pre3")
                 & (_numcol("wave_pattern_score") >= 60)
                 & (_numcol("wave_launch_prob") >= 0.35)
                 & (wave_all["wave_composite"] >= 50)
+                & wave_all.get("wave3_valid", pd.Series(True, index=wave_all.index)).fillna(False).astype(bool)
             ].copy()
             for frame in (typical, pre):
                 if not frame.empty:
@@ -552,6 +556,7 @@ def run_scan(
                     all_first["first_wave_stage_code"].isin(["pre1", "pre1_break"])
                     & (pd.to_numeric(all_first["first_wave_pattern_score"], errors="coerce").fillna(0) >= 55)
                     & (pd.to_numeric(all_first["first_wave_launch_prob"], errors="coerce").fillna(0) >= 0.30)
+                    & ~all_first.get("wave3_shape_code", pd.Series("none", index=all_first.index)).isin(["failed3"])
                 ].copy()
                 if not all_first.empty:
                     # 真实六维/六格：潜在来源要求六维≥9；活跃来源要求六格≥5且安全。

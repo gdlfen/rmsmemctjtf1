@@ -55,7 +55,7 @@ class ScanSettings:
     min_amount20_yi: float = 0.0
     exclude_loss: bool = False
     risk_mode: str = "auto"  # auto / offensive / defensive
-    sort_mode: str = "rally"  # rally / fundamental / speculation
+    sort_mode: str = "speculation"  # speculation / rally / fundamental
     as_of: str = ""  # YYYY-MM-DD；留空表示自动取最近已收盘交易日
     lookback_bars: int = 320
 
